@@ -1,6 +1,13 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import {
+  blueprintItems,
+  curriculum,
+  mistakeCategories,
+  prioritySops,
+  responsibilityRows,
+} from "./demo-data";
 
 type View =
   | "dashboard"
@@ -10,7 +17,9 @@ type View =
   | "sops"
   | "certificates"
   | "analytics"
-  | "admin";
+  | "admin"
+  | "builder"
+  | "blueprint";
 
 const nav = [
   ["dashboard", "⌂", "Overview"],
@@ -21,6 +30,8 @@ const nav = [
   ["certificates", "◇", "Certificates"],
   ["analytics", "◫", "Insights"],
   ["admin", "⚙", "Administration"],
+  ["builder", "▦", "Course builder"],
+  ["blueprint", "✦", "Management blueprint"],
 ] as const;
 
 const activities = [
@@ -131,6 +142,8 @@ export default function Home() {
   const [notifications, setNotifications] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [filter, setFilter] = useState("All");
+  const [role, setRole] = useState<"employee" | "admin">("employee");
+  const [blueprintTab, setBlueprintTab] = useState("01");
 
   const title = useMemo(
     () => nav.find((x) => x[0] === view)?.[2] ?? "Overview",
@@ -211,8 +224,12 @@ export default function Home() {
         <button className="user-card" onClick={() => setModal("profile")}>
           <img src="https://i.pravatar.cc/96?img=12" alt="Employee profile" />
           <span>
-            <b>Alex Morgan</b>
-            <small>Product Operations</small>
+            <b>{role === "employee" ? "Asha Sharma" : "Company Admin"}</b>
+            <small>
+              {role === "employee"
+                ? "Operations · Pathfinder"
+                : "Platform control centre"}
+            </small>
           </span>
           <i>•••</i>
         </button>
@@ -225,6 +242,26 @@ export default function Home() {
             <h1>{title}</h1>
           </div>
           <div className="top-actions">
+            <label className="role-switch">
+              <span>VIEWING AS</span>
+              <select
+                value={role}
+                onChange={(e) => {
+                  const next = e.target.value as "employee" | "admin";
+                  setRole(next);
+                  go(next === "admin" ? "admin" : "dashboard");
+                  act(
+                    next === "admin"
+                      ? "Company Admin view enabled"
+                      : "Employee view enabled",
+                  );
+                }}
+                aria-label="Viewing as"
+              >
+                <option value="employee">Employee</option>
+                <option value="admin">Company Admin</option>
+              </select>
+            </label>
             <button
               className="icon-btn"
               onClick={() => act("Help centre opened")}
@@ -290,7 +327,7 @@ export default function Home() {
                   <i /> YOUR WORKDAY, SIMPLIFIED
                 </span>
                 <h2>
-                  Good morning, Alex.
+                  Welcome back, Asha.
                   <br />
                   <em>What do you need to achieve?</em>
                 </h2>
@@ -345,10 +382,10 @@ export default function Home() {
                 <div>
                   <span className="stat-icon">◈</span>
                   <small>LEARNING PROGRESS</small>
-                  <h3>68%</h3>
-                  <p>8 of 12 core modules complete</p>
+                  <h3>25%</h3>
+                  <p>2 of 8 induction sessions complete</p>
                 </div>
-                <Ring value={68} label="complete" />
+                <Ring value={25} label="complete" />
                 <button onClick={() => go("training")}>
                   Continue learning <span>→</span>
                 </button>
@@ -380,6 +417,33 @@ export default function Home() {
                 <button onClick={() => go("analytics")}>
                   Open insights <span>→</span>
                 </button>
+              </article>
+            </section>
+
+            <section className="reward-strip">
+              <article>
+                <span>◆</span>
+                <div>
+                  <small>REWARD POINTS</small>
+                  <b>1,240</b>
+                  <p>Level 3 · Pathfinder</p>
+                </div>
+              </article>
+              <article>
+                <span>🏅</span>
+                <div>
+                  <small>CERTIFICATES</small>
+                  <b>1 active</b>
+                  <p>Workplace Basics earned</p>
+                </div>
+              </article>
+              <article className="leader-mini">
+                <div>
+                  <small>DEPARTMENT LEADERBOARD</small>
+                  <b>#2 Asha Sharma</b>
+                  <p>940 points to reach first place</p>
+                </div>
+                <button onClick={() => go("training")}>View learning →</button>
               </article>
             </section>
 
@@ -640,27 +704,64 @@ export default function Home() {
                     <button>Completed</button>
                   </div>
                 </div>
-                {learning.map((l, i) => (
-                  <article className="module-row" key={l.name}>
-                    <div className={`module-num ${l.tone}`}>
-                      {String(i + 5).padStart(2, "0")}
-                    </div>
-                    <div className="module-copy">
-                      <span>{l.meta}</span>
-                      <h4>{l.name}</h4>
-                      <div className="module-progress">
-                        <i style={{ width: `${l.progress}%` }} />
+                {curriculum.slice(0, 8).map((l, i) => {
+                  const complete = i < 2;
+                  const current = i === 2;
+                  return (
+                    <article
+                      className={`module-row ${!complete && !current ? "locked" : ""}`}
+                      key={l[0]}
+                    >
+                      <div
+                        className={`module-num ${["purple", "blue", "green"][i % 3]}`}
+                      >
+                        {complete ? "✓" : current ? "▶" : "⌁"}
                       </div>
-                    </div>
-                    <div className="module-end">
-                      <small>{l.due}</small>
-                      <b>{l.progress}%</b>
-                      <button onClick={() => setModal("player")}>
-                        {l.progress ? "Continue" : "Start"} →
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                      <div className="module-copy">
+                        <span>
+                          {l[0]} ·{" "}
+                          {i < 4
+                            ? "MODULE 1 · COMPANY INTRODUCTION"
+                            : "MODULE 2 · CORE CONDUCT"}
+                        </span>
+                        <h4>{l[1]}</h4>
+                        <p>{l[2]}</p>
+                        <div className="module-progress">
+                          <i
+                            style={{
+                              width: complete ? "100%" : current ? "42%" : "0%",
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div className="module-end">
+                        <small>
+                          {l[3]} ·{" "}
+                          {complete
+                            ? "Score recorded"
+                            : current
+                              ? "In progress"
+                              : "Pass previous quiz"}
+                        </small>
+                        <b>
+                          {complete
+                            ? i
+                              ? "85%"
+                              : "90%"
+                            : current
+                              ? "42%"
+                              : "Locked"}
+                        </b>
+                        <button
+                          disabled={!complete && !current}
+                          onClick={() => setModal(complete ? "quiz" : "player")}
+                        >
+                          {complete ? "Review" : current ? "Open" : "Locked"} →
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
               </div>
               <aside className="learning-side">
                 <div className="streak-card">
@@ -736,78 +837,54 @@ export default function Home() {
                   ＋ New Activity
                 </button>
               </div>
-              <div className="matrix-table">
-                <div className="matrix-head">
+              <div className="matrix-count">
+                <b>{responsibilityRows.length} starter activities</b>
+                <span>
+                  All departments · reviewed 6 Aug 2026 · placeholders require
+                  organisation confirmation
+                </span>
+              </div>
+              <div className="matrix-scroll">
+                <div className="full-matrix matrix-head">
                   <span>ACTIVITY</span>
                   <span>DEPARTMENT</span>
-                  <span>RESPONSIBLE OWNER</span>
+                  <span>RESPONSIBLE ROLE</span>
+                  <span>CURRENT PERSON</span>
+                  <span>BACKUP</span>
+                  <span>CONTACT</span>
                   <span>SLA</span>
-                  <span>STATUS</span>
-                  <span />
+                  <span>ESCALATION L1</span>
+                  <span>ESCALATION L2</span>
+                  <span>SOP</span>
+                  <span>TRAINING</span>
                 </div>
-                {[
-                  [
-                    "Leave Request",
-                    "Human Resources",
-                    "Priya Shah · HR Operations Lead",
-                    "2 working days",
-                    "Confirmed",
-                  ],
-                  [
-                    "Asset Request or Allocation",
-                    "Information Technology",
-                    "Daniel Reed · IT Asset Manager",
-                    "5 working days",
-                    "Confirmed",
-                  ],
-                  [
-                    "Expense Reimbursement",
-                    "Finance",
-                    "Maya Chen · AP Specialist",
-                    "Next payment cycle",
-                    "Confirmed",
-                  ],
-                  [
-                    "Vendor Onboarding",
-                    "Procurement",
-                    "Noah Williams · Vendor Lead",
-                    "10 working days",
-                    "Review due",
-                  ],
-                  [
-                    "Contract Approval",
-                    "Legal / Compliance",
-                    "Aisha Khan · Legal Counsel",
-                    "7 working days",
-                    "Confirmed",
-                  ],
-                ].map((r, i) => (
+                {responsibilityRows.map((r, i) => (
                   <button
-                    className="matrix-row"
+                    className="full-matrix matrix-row"
                     key={r[0]}
-                    onClick={() => setModal(`activity-${i % 3}`)}
+                    onClick={() => setModal(`matrix-${i}`)}
                   >
                     <span>
-                      <i className={`dept-dot d${i}`} />
+                      <i className={`dept-dot d${i % 5}`} />
                       <b>{r[0]}</b>
                       <small>ACT-{String(i + 1).padStart(3, "0")}</small>
                     </span>
                     <span>{r[1]}</span>
                     <span>
-                      <img
-                        src={`https://i.pravatar.cc/60?img=${20 + i}`}
-                        alt=""
-                      />
                       <b>{r[2]}</b>
-                      <small>Backup confirmed</small>
                     </span>
                     <span>{r[3]}</span>
+                    <span>{r[4]}</span>
+                    <span>{r[5]}</span>
+                    <span>{r[6]}</span>
+                    <span>{r[7]}</span>
+                    <span>{r[8]}</span>
                     <span>
-                      <em className={r[4] === "Confirmed" ? "good" : "warn"}>
-                        {r[4]}
-                      </em>
+                      <em className="good">{r[9]}</em>
                     </span>
-                    <span>→</span>
+                    <span>
+                      <em className="good">{r[10]}</em>
+                    </span>
                   </button>
                 ))}
               </div>
@@ -914,6 +991,48 @@ export default function Home() {
                   </div>
                 </article>
               ))}
+            </section>
+            <section className="repository-plan panel">
+              <div className="panel-title">
+                <div>
+                  <small>INITIAL REPOSITORY PLAN</small>
+                  <h3>First ten SOPs, prioritised by operational need</h3>
+                </div>
+                <button onClick={() => setModal("sop-template")}>
+                  View standard SOP template →
+                </button>
+              </div>
+              <div className="repository-layout">
+                <div className="taxonomy">
+                  <b>Taxonomy</b>
+                  <span>Department → Activity → Content type → Status</span>
+                  <p>
+                    Every controlled document includes owner, approver, version,
+                    effective date, purpose, scope, prerequisites, numbered
+                    steps, controls, evidence, escalation, exceptions, related
+                    records and review cadence.
+                  </p>
+                </div>
+                <div className="sop-priority-list">
+                  {prioritySops.map((s, i) => (
+                    <button
+                      key={s[0]}
+                      onClick={() => act(`${s[0]} planning record opened`)}
+                    >
+                      <em>{i + 1}</em>
+                      <span>
+                        <b>
+                          {s[0]} · {s[1]}
+                        </b>
+                        <small>
+                          {s[2]} · {s[3]}
+                        </small>
+                      </span>
+                      <i>→</i>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </section>
           </div>
         )}
@@ -1155,19 +1274,24 @@ export default function Home() {
                   losing governance.
                 </p>
               </div>
-              <button
-                className="primary big"
-                onClick={() => setModal("create")}
-              >
-                ＋ Create content
-              </button>
+              <div className="intro-actions">
+                <button onClick={() => go("builder")}>
+                  Open course builder
+                </button>
+                <button
+                  className="primary big"
+                  onClick={() => setModal("create")}
+                >
+                  ＋ Create content
+                </button>
+              </div>
             </section>
             <section className="admin-stats">
               {[
-                ["Published content", "426", "+12 this month"],
-                ["Active employees", "248", "97% activated"],
-                ["Overdue reviews", "8", "Needs action"],
-                ["Automation health", "99.8%", "1 retry queued"],
+                ["Total employees", "1,248", "Across 7 departments"],
+                ["Training completion", "74%", "↑ 6% this month"],
+                ["Certificates issued", "862", "This year"],
+                ["Average quiz score", "81%", "Retake rate 14%"],
               ].map((s, i) => (
                 <article key={s[0]}>
                   <span className={`admin-icon a${i}`}>
@@ -1267,6 +1391,491 @@ export default function Home() {
             </section>
           </div>
         )}
+
+        {view === "builder" && (
+          <div className="page animate-in">
+            <section className="section-intro compact">
+              <div>
+                <span className="eyebrow dark">
+                  <i /> NO-CODE COURSE BUILDER
+                </span>
+                <h2>
+                  Turn knowledge into
+                  <br />
+                  <em>guided behaviour.</em>
+                </h2>
+                <p>
+                  Reorder modules, add sessions, attach assessments and publish
+                  controlled learning without writing code.
+                </p>
+              </div>
+              <div className="intro-actions">
+                <button onClick={() => act("Draft saved")}>Save draft</button>
+                <button
+                  className="primary big"
+                  onClick={() => act("Curriculum published to pilot cohort")}
+                >
+                  Publish curriculum
+                </button>
+              </div>
+            </section>
+            <section className="builder-summary">
+              <article>
+                <small>CURRICULUM</small>
+                <b>22 modules</b>
+                <p>Core induction + operational pathways</p>
+              </article>
+              <article>
+                <small>ASSESSMENT RULE</small>
+                <b>80% pass</b>
+                <p>Unlimited retakes · question analytics</p>
+              </article>
+              <article>
+                <small>ESTIMATED TIME</small>
+                <b>4h 28m</b>
+                <p>Delivered in short, trackable sessions</p>
+              </article>
+              <article>
+                <small>STATUS</small>
+                <b>Draft v1.0</b>
+                <p>Ready for owner validation</p>
+              </article>
+            </section>
+            <section className="course-builder panel">
+              {[
+                "Organisation & Culture",
+                "Conduct, Security & Communication",
+                "People & Operational Processes",
+                "Ownership, Development & FAQs",
+              ].map((group, groupIndex) => (
+                <article className="builder-module" key={group}>
+                  <header>
+                    <span>⠿</span>
+                    <div>
+                      <small>MODULE {groupIndex + 1}</small>
+                      <h3>{group}</h3>
+                    </div>
+                    <button onClick={() => act(`Session added to ${group}`)}>
+                      ＋ Add session
+                    </button>
+                  </header>
+                  {curriculum
+                    .slice(
+                      groupIndex * 6,
+                      Math.min(groupIndex * 6 + 6, curriculum.length),
+                    )
+                    .map((item, i) => (
+                      <div className="builder-session" key={item[0]}>
+                        <span>⠿</span>
+                        <em>{item[0]}</em>
+                        <div>
+                          <b>{item[1]}</b>
+                          <small>{item[2]}</small>
+                        </div>
+                        <i>{item[3]}</i>
+                        <button onClick={() => setModal("quiz")}>Quiz</button>
+                        <button onClick={() => act(`${item[1]} duplicated`)}>
+                          ⧉
+                        </button>
+                        <button
+                          onClick={() => act(`${item[1]} opened for editing`)}
+                        >
+                          Edit
+                        </button>
+                      </div>
+                    ))}
+                </article>
+              ))}
+              <button
+                className="add-module"
+                onClick={() => act("New module block added")}
+              >
+                ＋ Add curriculum module
+              </button>
+            </section>
+          </div>
+        )}
+
+        {view === "blueprint" && (
+          <div className="page blueprint-page animate-in">
+            <section className="blueprint-hero">
+              <div>
+                <span className="eyebrow">
+                  <i /> MANAGEMENT DELIVERY BLUEPRINT
+                </span>
+                <h2>
+                  Every commitment in the email.
+                  <br />
+                  <em>One connected delivery system.</em>
+                </h2>
+                <p>
+                  This prototype links the product experience to the complete
+                  Phase-0 plan: content, ownership, architecture, implementation
+                  and scale.
+                </p>
+                <div className="blueprint-hero-actions">
+                  <button
+                    className="primary"
+                    onClick={() => act("Management summary prepared")}
+                  >
+                    Present executive summary →
+                  </button>
+                  <button onClick={() => setBlueprintTab("06")}>
+                    View architecture
+                  </button>
+                </div>
+              </div>
+              <div className="delivery-score">
+                <span>10/10</span>
+                <b>Management deliverables represented</b>
+                <p>Planning + content + prototype + roadmap</p>
+              </div>
+            </section>
+            <section className="phase-line">
+              {[
+                ["NOW", "Phase 0", "Validate plan, content and prototype"],
+                ["NEXT", "Phase 1", "Single-organisation MVP"],
+                ["EXPAND", "Phase 2", "AI search, assessment and analytics"],
+                ["SCALE", "Phase 3", "Multi-organisation rollout"],
+              ].map((p, i) => (
+                <article key={p[1]}>
+                  <em>{String(i + 1).padStart(2, "0")}</em>
+                  <small>{p[0]}</small>
+                  <b>{p[1]}</b>
+                  <p>{p[2]}</p>
+                </article>
+              ))}
+            </section>
+            <section className="blueprint-workspace">
+              <aside className="blueprint-nav">
+                {blueprintItems.map((item) => (
+                  <button
+                    key={item[0]}
+                    className={blueprintTab === item[0] ? "active" : ""}
+                    onClick={() => setBlueprintTab(item[0])}
+                  >
+                    <span>{item[0]}</span>
+                    <div>
+                      <b>{item[1]}</b>
+                      <small>{item[2]}</small>
+                    </div>
+                  </button>
+                ))}
+              </aside>
+              <article className="blueprint-detail">
+                {blueprintItems
+                  .filter((item) => item[0] === blueprintTab)
+                  .map((item) => (
+                    <header key={item[0]}>
+                      <span>DELIVERABLE {item[0]}</span>
+                      <h2>{item[1]}</h2>
+                      <p>{item[2]}</p>
+                      <b>{item[3]}</b>
+                    </header>
+                  ))}
+                {blueprintTab === "01" && (
+                  <div className="detail-grid four">
+                    {[
+                      [
+                        "Phase 0",
+                        "Plan, architecture, curriculum, content inventory and validated prototype",
+                        "Management approval",
+                      ],
+                      [
+                        "Phase 1",
+                        "Tenant foundation, identity, knowledge, matrix, SOP and training MVP",
+                        "Pilot readiness",
+                      ],
+                      [
+                        "Phase 2",
+                        "LangGraph AI search, assessments, certificates, analytics and n8n automation",
+                        "Measured adoption",
+                      ],
+                      [
+                        "Phase 3",
+                        "Self-service organisation onboarding, controls, billing readiness and regional scale",
+                        "100+ organisations",
+                      ],
+                    ].map((x) => (
+                      <section key={x[0]}>
+                        <small>{x[0]}</small>
+                        <h3>{x[1]}</h3>
+                        <p>
+                          Gate: {x[2]} · Dependencies and owners confirmed
+                          before start.
+                        </p>
+                      </section>
+                    ))}
+                  </div>
+                )}
+                {blueprintTab === "02" && (
+                  <div className="curriculum-table">
+                    <div>
+                      <b>MODULE</b>
+                      <b>LEARNING OBJECTIVE</b>
+                      <b>DURATION</b>
+                    </div>
+                    {curriculum.map((c) => (
+                      <button key={c[0]} onClick={() => go("builder")}>
+                        <span>
+                          <em>{c[0]}</em>
+                          <b>{c[1]}</b>
+                        </span>
+                        <p>{c[2]}</p>
+                        <i>{c[3]}</i>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {blueprintTab === "03" && (
+                  <>
+                    <div className="mistake-total">
+                      <b>127</b>
+                      <span>
+                        recurring mistakes catalogued
+                        <br />
+                        <small>
+                          Every item maps to explicit training content
+                        </small>
+                      </span>
+                    </div>
+                    <div className="detail-grid">
+                      {mistakeCategories.map((m) => (
+                        <section key={m[0]}>
+                          <small>{m[1]} MISTAKES</small>
+                          <h3>{m[0]}</h3>
+                          <p>{m[2]}</p>
+                          <em>Training mapping required ✓</em>
+                        </section>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {blueprintTab === "04" && (
+                  <div className="feature-proof">
+                    <div>
+                      <b>22</b>
+                      <span>starter activities</span>
+                    </div>
+                    <div>
+                      <b>8</b>
+                      <span>departments</span>
+                    </div>
+                    <div>
+                      <b>11</b>
+                      <span>required data fields</span>
+                    </div>
+                    <button className="primary" onClick={() => go("matrix")}>
+                      Open complete matrix →
+                    </button>
+                  </div>
+                )}
+                {blueprintTab === "05" && (
+                  <div className="priority-blueprint">
+                    {prioritySops.map((s, i) => (
+                      <div key={s[0]}>
+                        <em>{i + 1}</em>
+                        <span>
+                          <b>
+                            {s[0]} · {s[1]}
+                          </b>
+                          <small>
+                            {s[2]} · {s[3]}
+                          </small>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {blueprintTab === "06" && (
+                  <>
+                    <div className="architecture-flow">
+                      {[
+                        [
+                          "EXPERIENCE",
+                          "Next.js web app",
+                          "Employee · Manager · Admin",
+                        ],
+                        [
+                          "APPLICATION",
+                          "FastAPI services",
+                          "RBAC · content · training · audit",
+                        ],
+                        [
+                          "INTELLIGENCE",
+                          "LangGraph agent",
+                          "Intent · retrieval · confidence · citations",
+                        ],
+                        [
+                          "DATA",
+                          "PostgreSQL + pgvector",
+                          "org_id · RLS · semantic index",
+                        ],
+                        [
+                          "AUTOMATION",
+                          "n8n on AWS",
+                          "Reminders · routing · escalation",
+                        ],
+                      ].map((x, i) => (
+                        <section key={x[0]}>
+                          <small>{x[0]}</small>
+                          <b>{x[1]}</b>
+                          <p>{x[2]}</p>
+                          {i < 4 && <i>→</i>}
+                        </section>
+                      ))}
+                    </div>
+                    <div className="query-flow">
+                      <b>Employee question</b>
+                      <span>→</span>
+                      <b>Tenant scope</b>
+                      <span>→</span>
+                      <b>Semantic + matrix lookup</b>
+                      <span>→</span>
+                      <b>Verified answer with sources</b>
+                      <span>→</span>
+                      <b>Owner escalation if unresolved</b>
+                    </div>
+                  </>
+                )}
+                {blueprintTab === "07" && (
+                  <div className="detail-grid">
+                    {[
+                      "Employee dashboard",
+                      "Knowledge search",
+                      "Activity detail",
+                      "Responsibility Matrix",
+                      "SOP repository",
+                      "Training player",
+                      "Quiz & assessment",
+                      "Certificate tracker",
+                      "Admin dashboard",
+                      "Course builder",
+                      "Analytics",
+                      "Management blueprint",
+                    ].map((x, i) => (
+                      <section key={x}>
+                        <small>SCREEN {String(i + 1).padStart(2, "0")}</small>
+                        <h3>{x}</h3>
+                        <p>
+                          Responsive, role-aware and demonstrated in this
+                          clickable prototype.
+                        </p>
+                      </section>
+                    ))}
+                  </div>
+                )}
+                {blueprintTab === "08" && (
+                  <div className="assessment-flow">
+                    {[
+                      ["1", "Learn", "Video, text, scenario or document"],
+                      ["2", "Check", "Question checks within each session"],
+                      ["3", "Assess", "Quiz with 80% passing threshold"],
+                      ["4", "Certify", "Issue verifiable certificate"],
+                      [
+                        "5",
+                        "Refresh",
+                        "Risk-based annual or policy-triggered cadence",
+                      ],
+                      [
+                        "6",
+                        "Improve",
+                        "Results feed employee and admin analytics",
+                      ],
+                    ].map((x) => (
+                      <section key={x[0]}>
+                        <em>{x[0]}</em>
+                        <b>{x[1]}</b>
+                        <p>{x[2]}</p>
+                      </section>
+                    ))}
+                  </div>
+                )}
+                {blueprintTab === "09" && (
+                  <div className="roadmap-list">
+                    {[
+                      [
+                        "01",
+                        "Foundation",
+                        "Tenant model, environments, CI/CD, identity and roles",
+                      ],
+                      [
+                        "02",
+                        "Knowledge core",
+                        "Matrix, SOPs, documents, versioning and universal search",
+                      ],
+                      [
+                        "03",
+                        "Learning core",
+                        "Curriculum, player, quizzes, results, certificates and reminders",
+                      ],
+                      [
+                        "04",
+                        "Admin & governance",
+                        "Content workflow, users, ownership, audit and analytics",
+                      ],
+                      [
+                        "05",
+                        "Integrations",
+                        "AWS services, Claude API, LangGraph and n8n automation",
+                      ],
+                      [
+                        "06",
+                        "Pilot & hardening",
+                        "UAT, accessibility, security, performance, training and launch",
+                      ],
+                    ].map((x) => (
+                      <div key={x[0]}>
+                        <em>{x[0]}</em>
+                        <span>
+                          <b>{x[1]}</b>
+                          <p>{x[2]}</p>
+                        </span>
+                        <i>Acceptance gate →</i>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {blueprintTab === "10" && (
+                  <div className="scale-grid">
+                    {[
+                      [
+                        "Tenant isolation",
+                        "org_id on every record + PostgreSQL RLS + tenant-aware cache and vector namespaces",
+                      ],
+                      [
+                        "Organisation onboarding",
+                        "Guided setup for branding, hierarchy, domains, roles, policies and content import",
+                      ],
+                      [
+                        "Configuration limits",
+                        "Theme, terminology, modules and workflows configurable without code forks",
+                      ],
+                      [
+                        "Data & compliance",
+                        "Auditability, encryption, retention, regional deployment and residency controls",
+                      ],
+                      [
+                        "Commercial readiness",
+                        "Plan entitlements, usage metering, subscription events and organisation lifecycle",
+                      ],
+                      [
+                        "Operational scale",
+                        "Observability, queues, rate limits, background jobs, support tiers and recovery objectives",
+                      ],
+                    ].map((x) => (
+                      <section key={x[0]}>
+                        <h3>{x[0]}</h3>
+                        <p>{x[1]}</p>
+                        <span>Designed from day one ✓</span>
+                      </section>
+                    ))}
+                  </div>
+                )}
+              </article>
+            </section>
+          </div>
+        )}
       </section>
 
       {modal && (
@@ -1303,6 +1912,134 @@ export default function Home() {
                   </button>
                   <button onClick={() => setModal(null)}>Save & exit</button>
                 </div>
+              </>
+            ) : modal === "quiz" ? (
+              <>
+                <span className="eyebrow dark">
+                  <i /> KNOWLEDGE CHECK · QUESTION 3 OF 5
+                </span>
+                <h2>
+                  Which channel should Asha use to report an IT access issue?
+                </h2>
+                <p>
+                  Select the answer that follows the organisation&apos;s
+                  approved process. A score of 80% or above unlocks the next
+                  session.
+                </p>
+                <div className="quiz-options">
+                  {[
+                    "Message a familiar IT colleague directly",
+                    "Raise a ticket through the official IT service desk",
+                    "Post the issue in a general WhatsApp group",
+                    "Wait until the weekly team meeting",
+                  ].map((answer, i) => (
+                    <button
+                      key={answer}
+                      onClick={() =>
+                        act(
+                          i === 1
+                            ? "Correct — the official service desk preserves ownership and SLA"
+                            : "Try again — use the governed request channel",
+                        )
+                      }
+                    >
+                      <span>{String.fromCharCode(65 + i)}</span>
+                      {answer}
+                    </button>
+                  ))}
+                </div>
+                <div className="quiz-rule">
+                  <b>Passing rule</b>
+                  <span>
+                    80% minimum · unlimited retakes · result recorded in
+                    employee and admin analytics
+                  </span>
+                </div>
+                <div className="modal-actions">
+                  <button
+                    className="primary"
+                    onClick={() => act("Answer submitted")}
+                  >
+                    Submit answer →
+                  </button>
+                  <button onClick={() => setModal(null)}>Save & exit</button>
+                </div>
+              </>
+            ) : modal.startsWith("matrix-") ? (
+              <>
+                {(() => {
+                  const row =
+                    responsibilityRows[Number(modal.split("-")[1])] ??
+                    responsibilityRows[0];
+                  return (
+                    <>
+                      <span className="eyebrow dark">
+                        <i /> VERIFIED RESPONSIBILITY RECORD
+                      </span>
+                      <h2>{row[0]}</h2>
+                      <p>
+                        Employees can see the exact owner, approved channel,
+                        turnaround and escalation path without asking multiple
+                        people.
+                      </p>
+                      <div className="modal-data matrix-modal">
+                        <div>
+                          <small>DEPARTMENT</small>
+                          <b>{row[1]}</b>
+                        </div>
+                        <div>
+                          <small>RESPONSIBLE ROLE</small>
+                          <b>{row[2]}</b>
+                        </div>
+                        <div>
+                          <small>CURRENT PERSON</small>
+                          <b>{row[3]} · organisation to confirm</b>
+                        </div>
+                        <div>
+                          <small>BACKUP</small>
+                          <b>{row[4]}</b>
+                        </div>
+                        <div>
+                          <small>CONTACT</small>
+                          <b>{row[5]}</b>
+                        </div>
+                        <div>
+                          <small>SLA</small>
+                          <b>{row[6]}</b>
+                        </div>
+                        <div>
+                          <small>ESCALATION LEVEL 1</small>
+                          <b>{row[7]}</b>
+                        </div>
+                        <div>
+                          <small>ESCALATION LEVEL 2</small>
+                          <b>{row[8]}</b>
+                        </div>
+                        <div>
+                          <small>RELATED SOP</small>
+                          <b>{row[9]}</b>
+                        </div>
+                        <div>
+                          <small>TRAINING MODULE</small>
+                          <b>{row[10]}</b>
+                        </div>
+                      </div>
+                      <div className="modal-actions">
+                        <button
+                          className="primary"
+                          onClick={() => act("Official request channel opened")}
+                        >
+                          Open official channel ↗
+                        </button>
+                        <button
+                          onClick={() => act("Responsibility record copied")}
+                        >
+                          Copy record
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
               </>
             ) : modal.startsWith("activity") ? (
               <>
