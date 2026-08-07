@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Activity, Certificate, Department, Enrollment, Organization, QuizQuestion, SOPDocument, TrainingModule, User
+from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, Organization, QuizQuestion, SOPDocument, TrainingModule, User
 from .security import hash_password
 
 
@@ -65,6 +65,21 @@ SOPS = [
     ("SOP-09", "Recruitment & Referral", "Human Resources"), ("SOP-10", "Expense Reimbursement", "Finance"),
 ]
 
+# Mock common-mistake register. Replaced wholesale once the real survey is
+# uploaded through /api/v1/admin/mistakes/replace-seed (Edge API).
+MISTAKES = [
+    ("MIS-001", "Using a personal email ID for official work", "Official correspondence sent from a personal email account.", "Use only the organisation-issued email account for all official communication.", "Communication", "high", "TRN-06"),
+    ("MIS-002", "Sharing a personal mobile number as the official contact", "A personal number is given to vendors or clients instead of the official channel.", "Publish only the official contact number or helpdesk channel.", "Communication", "medium", "TRN-08"),
+    ("MIS-003", "Using a personal laptop without approval", "Company data is processed on an unapproved personal device.", "Request an approved company asset before handling organisation data.", "Information Security", "critical", "TRN-12"),
+    ("MIS-004", "Collecting assets outside the authorised process", "Assets are handed over informally with no record.", "Collect every asset through the documented allocation process and sign the record.", "Asset Management", "high", "TRN-12"),
+    ("MIS-005", "Incorrect use of Reply All", "Recipients who need visibility are dropped, or everyone is copied unnecessarily.", "Use Reply All only when every recipient genuinely needs the update.", "Communication", "low", "TRN-08"),
+    ("MIS-006", "Missing or outdated email signature", "Emails carry an old designation, old number or no signature at all.", "Keep the approved signature template current and remove superseded details.", "Communication", "low", "TRN-08"),
+    ("MIS-007", "Ignoring file naming conventions", "Files are saved with ad-hoc names that cannot be found later.", "Apply the published naming convention to every document.", "Records", "medium", "TRN-20"),
+    ("MIS-008", "Saving documents outside approved locations", "Work is stored on a desktop or personal drive.", "Save all work in the approved company location only.", "Records", "high", "TRN-20"),
+    ("MIS-009", "Storing company data on personal devices", "Organisation data is copied to personal phones or drives.", "Keep all organisation data inside approved systems.", "Information Security", "critical", "TRN-06"),
+    ("MIS-010", "Using informal channels for official requests", "Requests are made over personal chat instead of the official channel.", "Raise every request through the official channel so it is tracked.", "Process", "medium", "TRN-15"),
+]
+
 
 def seed_database(db: Session) -> None:
     if db.scalar(select(Organization.id).limit(1)):
@@ -88,4 +103,7 @@ def seed_database(db: Session) -> None:
         db.add(Activity(org_id=org.id, name=name, department=department, responsible_role=role, current_person="Organisation to confirm", backup_person=f"{department} backup", contact_details=contact, sla=sla, escalation_level_1=l1, escalation_level_2=l2, related_documents=[f"{sop} form or checklist"], sop_link=sop, training_module_link=module, process_steps=["Open the official request channel", "Provide the required information and evidence", "Track the published SLA", f"Escalate to {l1} if unresolved"]))
     for code, title, department in SOPS:
         db.add(SOPDocument(org_id=org.id, code=code, title=title, department=department, owner_role=f"{department} process owner", approver_role=f"{department} head", version="1.0", status="effective", effective_date=date.today(), review_date=date.today() + timedelta(days=180), summary=f"Controlled procedure for {title.lower()}.", content={"purpose": f"Standardise {title.lower()}", "scope": "All employees", "steps": ["Use the official channel", "Complete required fields", "Retain evidence", "Escalate within the published hierarchy"], "controls": ["Owner approval", "Version control", "Audit trail"]}))
+    module_by_code = {m.code: m for m in modules}
+    for code, title, description, correct_practice, category, severity, module_code in MISTAKES:
+        db.add(MistakeRegisterEntry(org_id=org.id, code=code, title=title, description=description, correct_practice=correct_practice, category=category, severity=severity, module_id=module_by_code[module_code].id, is_seed=True))
     db.commit()

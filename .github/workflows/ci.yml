@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+jobs:
+  frontend:
+    name: Lint and build (Next.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  backend:
+    name: FastAPI reference tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m venv backend/.venv
+      - run: backend/.venv/bin/pip install -r backend/requirements.txt
+      - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_api.py -q
+      - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_admin.py -q

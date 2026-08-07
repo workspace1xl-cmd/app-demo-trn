@@ -3,8 +3,9 @@
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import styles from "./platform.module.css";
+import AdminConsole from "./AdminConsole";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type Session = {
   access_token: string;
@@ -18,6 +19,17 @@ type View =
   | "sops"
   | "certificates"
   | "admin";
+export type AdminSection =
+  | "overview"
+  | "employees"
+  | "departments"
+  | "matrix"
+  | "sops"
+  | "training"
+  | "assignments"
+  | "content"
+  | "feedback"
+  | "audit";
 
 type Activity = {
   id: string; name: string; department: string; responsible_role: string;
@@ -32,7 +44,7 @@ type Certificate = { id: string; module: string; certificate_number: string; iss
 type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; sops: number; open_feedback: number };
 type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Sop[] | Certificate[] | AdminData | null;
 
-async function request<T = PlatformData>(
+export async function request<T = PlatformData>(
   path: string,
   token?: string,
   options: RequestInit = {},
@@ -62,6 +74,7 @@ export default function WorkingPlatform() {
   const [data, setData] = useState<PlatformData>(null);
   const [query, setQuery] = useState("leave");
   const [toast, setToast] = useState("");
+  const [adminSection, setAdminSection] = useState<AdminSection>("overview");
 
   useEffect(() => {
     const saved = sessionStorage.getItem("onework-session");
@@ -521,7 +534,33 @@ export default function WorkingPlatform() {
               ))}
             </div>
           )}
-          {!busy && adminData && (
+          {view === "admin" && (
+            <div className={styles.adminTabs}>
+              {(
+                [
+                  ["overview", "Overview"],
+                  ["employees", "Employees"],
+                  ["departments", "Departments"],
+                  ["matrix", "Responsibility Matrix"],
+                  ["sops", "SOP Approval"],
+                  ["training", "Training & Quiz Builder"],
+                  ["assignments", "Assignments"],
+                  ["content", "Content Library"],
+                  ["feedback", "Feedback Queue"],
+                  ["audit", "Audit Log"],
+                ] as [AdminSection, string][]
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  className={adminSection === id ? styles.adminTabActive : ""}
+                  onClick={() => setAdminSection(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {!busy && adminData && adminSection === "overview" && (
             <div className={styles.stats}>
               <Stat
                 label="EMPLOYEES"
@@ -559,6 +598,9 @@ export default function WorkingPlatform() {
                 note="Governance queue"
               />
             </div>
+          )}
+          {view === "admin" && adminSection !== "overview" && (
+            <AdminConsole token={session.access_token} section={adminSection} />
           )}
         </div>
       </section>

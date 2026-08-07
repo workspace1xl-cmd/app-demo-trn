@@ -84,6 +84,11 @@ class SOPDocument(Base, TimestampMixin):
     review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     summary: Mapped[str] = mapped_column(Text)
     content: Mapped[dict] = mapped_column(JSON, default=dict)
+    submitted_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class TrainingModule(Base, TimestampMixin):
@@ -126,6 +131,9 @@ class Enrollment(Base, TimestampMixin):
     progress_percent: Mapped[int] = mapped_column(Integer, default=0)
     best_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    assigned_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
 
 class QuizAttempt(Base, TimestampMixin):
@@ -159,6 +167,26 @@ class KnowledgeFeedback(Base, TimestampMixin):
     reason: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="open")
     routed_to: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MistakeRegisterEntry(Base, TimestampMixin):
+    __tablename__ = "mistake_register"
+    __table_args__ = (UniqueConstraint("org_id", "code"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    code: Mapped[str] = mapped_column(String(30), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    correct_practice: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(80))
+    severity: Mapped[str] = mapped_column(String(20), default="medium")
+    department: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    module_id: Mapped[str | None] = mapped_column(ForeignKey("training_modules.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="active")
+    is_seed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AuditEvent(Base):
