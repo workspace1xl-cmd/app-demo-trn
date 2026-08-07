@@ -537,6 +537,7 @@ export default function WorkingPlatform() {
                   label="COMPLETED MODULES"
                   value={`${dashboardData.training.completed}/${dashboardData.training.total}`}
                   note="Sequential induction path"
+                  tone="readiness"
                 />
                 <Stat
                   label="CERTIFICATES"
@@ -552,6 +553,7 @@ export default function WorkingPlatform() {
                   label="OPEN ACTIONS"
                   value={dashboardData.open_actions}
                   note="Requires attention"
+                  tone={dashboardData.open_actions > 0 ? "risk" : undefined}
                 />
               </div>
             </>
@@ -786,6 +788,7 @@ export default function WorkingPlatform() {
                 label="COMPLETION"
                 value={`${adminData.training_completion}%`}
                 note="All assigned learning"
+                tone="readiness"
               />
               <Stat
                 label="CERTIFICATES"
@@ -806,6 +809,7 @@ export default function WorkingPlatform() {
                 label="OPEN FEEDBACK"
                 value={adminData.open_feedback}
                 note="Governance queue"
+                tone={adminData.open_feedback > 0 ? "risk" : undefined}
               />
             </div>
           )}
@@ -853,13 +857,15 @@ function Stat({
   label,
   value,
   note,
+  tone,
 }: {
   label: string;
   value: string | number;
   note: string;
+  tone?: "readiness" | "risk";
 }) {
   return (
-    <article>
+    <article data-tone={tone}>
       <small>{label}</small>
       <h3>{value}</h3>
       <p>{note}</p>

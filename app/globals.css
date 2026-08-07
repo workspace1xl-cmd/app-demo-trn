@@ -1,6 +1,32 @@
 @import "tailwindcss";
 
-:root{--ink:#101321;--muted:#6d7285;--line:#e8e9f0;--surface:#fff;--canvas:#f4f5f9;--nav:#111326;--violet:#7057ff;--violet2:#9b7cff;--blue:#3684ff;--cyan:#1fc5d9;--green:#30b980;--amber:#f7ae38;--pink:#ef6fae;--shadow:0 18px 55px rgba(28,25,65,.1);--soft-shadow:0 8px 26px rgba(31,34,70,.07)}
+:root{--ink:#101321;--muted:#6d7285;--line:#e8e9f0;--surface:#fff;--canvas:#f4f5f9;--nav:#111326;--violet:#7057ff;--violet2:#9b7cff;--blue:#3684ff;--cyan:#1fc5d9;--green:#30b980;--amber:#f7ae38;--pink:#ef6fae;--shadow:0 18px 55px rgba(28,25,65,.1);--soft-shadow:0 8px 26px rgba(31,34,70,.07);
+  /* Design-direction tokens (BUILD PROMPT v3/v4): named for what they mean
+     in this product, not generic primary/secondary. --ownership marks who
+     is accountable for something; --readiness marks trained/current/
+     covered; --risk marks overdue/gaps/escalations. --graph-accent is
+     reserved for the responsibility graph and dashboard hero only — not
+     used decoratively elsewhere, per the design pass. Additive to the
+     existing --ink/--canvas/etc above (untouched, still used by the
+     marketing page) rather than replacing them, so this doesn't change
+     app/page.tsx's look. */
+  --ownership:#B8722E;--ownership-bg:#FBEEDD;--on-ownership:#5A3814;
+  --readiness:#1F7A5C;--readiness-bg:#E1F3EA;--on-readiness:#0F3D2E;
+  --risk:#C4452F;--risk-bg:#FBE7E2;--on-risk:#6B2318;
+  --graph-accent:#2B2A55;--graph-accent-2:#4A4890;
+  /* Literal font name, not var(--font-fraunces): a custom property whose
+     value nests a reference to ANOTHER custom property (one set via a
+     Next/font class on <body>, not :root) failed to resolve reliably —
+     getComputedStyle returned an empty string for --font-display and
+     font-family:var(--font-display) silently fell back to the inherited
+     sans on every element that used it, confirmed by testing font-family:
+     var(--font-fraunces) directly (works) vs var(--font-display) (didn't)
+     on the same element. Fraunces' actual resolved family names ("Fraunces
+     Fallback" is next/font's auto-generated metric-matched fallback) are
+     hardcoded here instead. */
+  --font-display:"Fraunces","Fraunces Fallback",Georgia,serif;
+  --sp-1:8px;--sp-2:16px;--sp-3:24px;--sp-4:32px;--sp-5:40px;--sp-6:48px;--sp-7:56px;--sp-8:64px;
+}
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--canvas);color:var(--ink);font-family:var(--font-geist-sans),Inter,Arial,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer}.app-shell{min-height:100vh}.sidebar{position:fixed;inset:0 auto 0 0;width:270px;background:radial-gradient(circle at 15% 5%,rgba(112,87,255,.25),transparent 26%),linear-gradient(180deg,#15172d,#0d0f20);color:#fff;padding:22px 16px 18px;z-index:30;display:flex;flex-direction:column;border-right:1px solid rgba(255,255,255,.07)}
 .brand{display:flex;align-items:center;gap:11px;background:none;border:0;color:#fff;padding:2px 8px 18px;text-align:left}.brand-mark{width:37px;height:37px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,#8b70ff,#4d76ff);box-shadow:0 8px 28px rgba(112,87,255,.45);transform:rotate(-5deg)}.brand-mark b{font-size:21px}.brand strong{display:block;font-size:17px;letter-spacing:-.02em}.brand small{display:block;color:#8e92aa;font-size:10px;letter-spacing:.14em;text-transform:uppercase;margin-top:2px}.org-switch{display:flex;align-items:center;gap:10px;padding:12px;margin:1px 2px 16px;border:1px solid rgba(255,255,255,.09);border-radius:14px;background:rgba(255,255,255,.045)}.org-avatar{width:33px;height:33px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(135deg,#25c4d7,#5c78ff);font-size:11px;font-weight:800}.org-switch div,.org-switch span:nth-child(2){min-width:0;flex:1}.org-switch b{font-size:11px;white-space:nowrap;display:block}.org-switch small{font-size:9px;color:#858aa3}.org-switch i{font-style:normal;color:#82879d}
 .sidebar nav{display:flex;flex-direction:column;gap:4px}.nav-label{font-size:9px;letter-spacing:.17em;color:#666b84;font-weight:800;margin:16px 12px 7px}.sidebar nav button{position:relative;width:100%;height:43px;border:0;border-radius:11px;background:transparent;color:#9297ae;text-align:left;padding:0 12px;display:flex;align-items:center;gap:12px;font-size:12px;font-weight:580;transition:.25s}.sidebar nav button span{font-size:18px;width:22px;text-align:center;color:#777d99}.sidebar nav button:hover{background:rgba(255,255,255,.06);color:#fff;transform:translateX(2px)}.sidebar nav button.active{color:#fff;background:linear-gradient(90deg,rgba(112,87,255,.26),rgba(112,87,255,.07));box-shadow:inset 3px 0 0 #8067ff}.sidebar nav button.active span{color:#a998ff}.sidebar nav button em{font-style:normal;margin-left:auto;background:#795fff;color:#fff;font-size:9px;padding:3px 7px;border-radius:20px}.sidebar-card{margin-top:auto;background:linear-gradient(145deg,rgba(112,87,255,.16),rgba(52,132,255,.06));border:1px solid rgba(132,117,255,.18);border-radius:15px;padding:13px 14px;position:relative}.sidebar-card .pulse-dot{position:absolute;right:14px;top:14px;width:7px;height:7px;border-radius:50%;background:#43dda3;box-shadow:0 0 0 5px rgba(67,221,163,.1);animation:pulse 2s infinite}.sidebar-card b{font-size:11px}.sidebar-card p{font-size:9px;color:#8f94ac;margin:5px 0 10px}.sidebar-card button{border:0;background:none;color:#b8abff;font-size:10px;padding:0}.user-card{margin-top:12px;padding:9px 7px;display:flex;align-items:center;gap:9px;border:0;background:transparent;color:#fff;text-align:left;border-radius:12px}.user-card:hover{background:rgba(255,255,255,.05)}.user-card img{width:33px;height:33px;border-radius:11px;object-fit:cover}.user-card span{flex:1}.user-card b{display:block;font-size:11px}.user-card small{color:#777c94;font-size:9px}.user-card i{font-style:normal;color:#666b80;letter-spacing:2px}
