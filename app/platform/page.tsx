@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import styles from "./platform.module.css";
 import AdminConsole from "./AdminConsole";
+import OrgSignup from "./OrgSignup";
 import QuizPlayer from "./QuizPlayer";
 
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -82,6 +83,7 @@ export default function WorkingPlatform() {
   const [query, setQuery] = useState("leave");
   const [toast, setToast] = useState("");
   const [adminSection, setAdminSection] = useState<AdminSection>("overview");
+  const [showSignup, setShowSignup] = useState(false);
   const [activeQuizModule, setActiveQuizModule] = useState<string | null>(null);
   const [activeVideo, setActiveVideo] = useState<ModuleResource | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -168,6 +170,38 @@ export default function WorkingPlatform() {
     if (result.passed) setView("certificates");
   }
 
+  if (!session && showSignup)
+    return (
+      <main className={styles.loginShell}>
+        <section className={styles.loginArt}>
+          <span>ONEWORK · PRODUCTION MODE</span>
+          <h1>
+            Your own tenant,
+            <br />
+            <em>ready in seconds.</em>
+          </h1>
+          <p>
+            A starter induction curriculum, tenant-isolated data and an
+            administrator account you can start customising immediately.
+          </p>
+          <div className={styles.liveStack}>
+            <b>● Isolated data</b>
+            <b>● 22-module curriculum</b>
+            <b>● Admin console included</b>
+          </div>
+        </section>
+        <OrgSignup
+          onBack={() => setShowSignup(false)}
+          onSignedUp={(next) => {
+            setSession(next);
+            sessionStorage.setItem("onework-session", JSON.stringify(next));
+            setView("admin");
+            setShowSignup(false);
+          }}
+        />
+      </main>
+    );
+
   if (!session)
     return (
       <main className={styles.loginShell}>
@@ -245,6 +279,12 @@ export default function WorkingPlatform() {
             </button>
           </div>
           <small>API: {API}</small>
+          <small>
+            New organisation?{" "}
+            <a href="#" onClick={(e) => { e.preventDefault(); setShowSignup(true); }}>
+              Create your account →
+            </a>
+          </small>
         </form>
       </main>
     );
