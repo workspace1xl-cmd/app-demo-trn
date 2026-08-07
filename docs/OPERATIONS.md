@@ -32,7 +32,7 @@ To run the same migration and function deploy from a local machine instead of CI
 npm run deploy:all
 ```
 
-This runs `scripts/db-push.sh` (which pushes migrations via a direct `--db-url` connection string, deliberately skipping `supabase link` — see the comment in that script for why) and `supabase functions deploy onework-api` through `npx`, so no global CLI install is required.
+This runs `supabase link`, `supabase db push --include-all` and `supabase functions deploy onework-api` through `npx`, pinned to CLI `2.111.0` (see the comment at the top of `.github/workflows/deploy.yml` — `2.112.0` broke `link` with a schema-validation bug), so no global CLI install is required.
 
 ## Add management's Claude API key
 
