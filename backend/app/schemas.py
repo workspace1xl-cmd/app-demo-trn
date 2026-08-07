@@ -50,16 +50,6 @@ class ActivityCreate(BaseModel):
     process_steps: list[str] = []
 
 
-class SOPCreate(BaseModel):
-    code: str
-    title: str
-    department: str
-    owner_role: str
-    approver_role: str
-    summary: str
-    content: dict = {}
-
-
 class ModuleCreate(BaseModel):
     code: str
     title: str
@@ -110,16 +100,6 @@ class ActivityUpdate(BaseModel):
     sop_link: str | None = None
     training_module_link: str | None = None
     status: str | None = None
-
-
-class SOPUpdate(BaseModel):
-    title: str | None = None
-    department: str | None = None
-    owner_role: str | None = None
-    approver_role: str | None = None
-    summary: str | None = None
-    content: dict | None = None
-    version: str | None = None
 
 
 class ModuleUpdate(BaseModel):

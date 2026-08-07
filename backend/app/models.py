@@ -68,27 +68,11 @@ class Activity(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="confirmed")
 
 
-class SOPDocument(Base, TimestampMixin):
-    __tablename__ = "sop_documents"
-    __table_args__ = (UniqueConstraint("org_id", "code"),)
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
-    code: Mapped[str] = mapped_column(String(30), index=True)
-    title: Mapped[str] = mapped_column(String(200))
-    department: Mapped[str] = mapped_column(String(120), index=True)
-    owner_role: Mapped[str] = mapped_column(String(160))
-    approver_role: Mapped[str] = mapped_column(String(160))
-    version: Mapped[str] = mapped_column(String(30), default="1.0")
-    status: Mapped[str] = mapped_column(String(30), default="draft")
-    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    review_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    summary: Mapped[str] = mapped_column(Text)
-    content: Mapped[dict] = mapped_column(JSON, default=dict)
-    submitted_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+# SOP documents live in SOPGalaxy (https://app.sopgalaxy.com/), not here —
+# no editor, no approval workflow, no status tracking. The former
+# SOPDocument model / sop_documents table has been removed, not left
+# running in parallel; Activity.sop_link (above) is the only trace of SOPs
+# this backend keeps, and it's a plain URL, not an owned record.
 
 
 class TrainingModule(Base, TimestampMixin):

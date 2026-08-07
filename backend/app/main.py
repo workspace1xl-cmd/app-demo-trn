@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
-from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Organization, QuizAttempt, QuizQuestion, SOPDocument, TrainingModule, User
-from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SOPCreate, SOPUpdate, SearchRequest, TokenResponse
+from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Organization, QuizAttempt, QuizQuestion, TrainingModule, User
+from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SearchRequest, TokenResponse
 from .security import create_token, hash_password, verify_password
 from .seed import MODULES, seed_database
 
@@ -25,10 +25,6 @@ def audit(db: Session, user: User, action: str, entity_type: str, entity_id: str
 
 
 def activity_dict(item: Activity) -> dict:
-    return {column.name: getattr(item, column.name) for column in item.__table__.columns}
-
-
-def sop_dict(item: SOPDocument) -> dict:
     return {column.name: getattr(item, column.name) for column in item.__table__.columns}
 
 
@@ -166,49 +162,10 @@ def update_activity(activity_id: str, payload: ActivityUpdate, user: User = Depe
     db.flush(); audit(db, user, "activity.update", "activity", item.id); db.commit(); return activity_dict(item)
 
 
-@app.get("/api/v1/sops")
-def list_sops(q: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    stmt = select(SOPDocument).where(SOPDocument.org_id == user.org_id)
-    if q: stmt = stmt.where(or_(SOPDocument.title.ilike(f"%{q}%"), SOPDocument.code.ilike(f"%{q}%"), SOPDocument.department.ilike(f"%{q}%")))
-    return [sop_dict(item) for item in db.scalars(stmt.order_by(SOPDocument.code)).all()]
-
-
-@app.post("/api/v1/admin/sops", status_code=201)
-def create_sop(payload: SOPCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    if db.scalar(select(SOPDocument).where(SOPDocument.org_id == user.org_id, SOPDocument.code == payload.code)):
-        raise HTTPException(409, "An SOP with this code already exists.")
-    item = SOPDocument(org_id=user.org_id, status="draft", **payload.model_dump()); db.add(item); db.flush(); audit(db, user, "sop.create", "sop", item.id); db.commit(); return sop_dict(item)
-
-
-@app.patch("/api/v1/admin/sops/{sop_id}")
-def update_sop(sop_id: str, payload: SOPUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    item = db.scalar(select(SOPDocument).where(SOPDocument.id == sop_id, SOPDocument.org_id == user.org_id))
-    if not item: raise HTTPException(404, "SOP not found.")
-    for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value)
-    db.flush(); audit(db, user, "sop.update", "sop", item.id); db.commit(); return sop_dict(item)
-
-
-SOP_TRANSITIONS = {
-    "submit": ({"draft"}, "in_review"),
-    "approve": ({"in_review"}, "effective"),
-    "retire": ({"effective", "approved"}, "archived"),
-}
-
-
-@app.post("/api/v1/admin/sops/{sop_id}/{action}")
-def sop_workflow(sop_id: str, action: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    if action not in SOP_TRANSITIONS: raise HTTPException(404, "Route not found.")
-    item = db.scalar(select(SOPDocument).where(SOPDocument.id == sop_id, SOPDocument.org_id == user.org_id))
-    if not item: raise HTTPException(404, "SOP not found.")
-    allowed_from, target = SOP_TRANSITIONS[action]
-    if item.status not in allowed_from:
-        raise HTTPException(409, f"An SOP in {item.status} status cannot be {'submitted' if action == 'submit' else 'approved' if action == 'approve' else 'retired'}.")
-    item.status = target
-    if action == "submit": item.submitted_by = user.id; item.submitted_at = datetime.utcnow()
-    if action == "approve":
-        item.approved_by = user.id; item.approved_at = datetime.utcnow()
-        item.effective_date = date.today(); item.review_date = date.today() + timedelta(days=180)
-    db.flush(); audit(db, user, f"sop.{action}", "sop", item.id, {"status": target}); db.commit(); return sop_dict(item)
+# SOP documents live in SOPGalaxy (https://app.sopgalaxy.com/), not here —
+# no editor, no approval workflow, no status tracking. Activity.sop_link is
+# the only trace of SOPs this backend keeps: a plain URL, not an owned
+# record.
 
 
 @app.get("/api/v1/training/modules")
@@ -329,13 +286,14 @@ async def claude_summary(query: str, context: str) -> str | None:
 async def knowledge_search(payload: SearchRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
     needle = f"%{payload.query}%"
     activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, or_(Activity.name.ilike(needle), Activity.department.ilike(needle), Activity.responsible_role.ilike(needle))).limit(5)).all()
-    sops = db.scalars(select(SOPDocument).where(SOPDocument.org_id == user.org_id, or_(SOPDocument.title.ilike(needle), SOPDocument.summary.ilike(needle))).limit(5)).all()
     modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id, or_(TrainingModule.title.ilike(needle), TrainingModule.objective.ilike(needle))).limit(5)).all()
     mistakes = db.scalars(select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.status == "active", or_(MistakeRegisterEntry.title.ilike(needle), MistakeRegisterEntry.description.ilike(needle))).limit(3)).all()
-    context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" for a in activities] + [f"SOP: {s.code} {s.title}; {s.summary}" for s in sops] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules] + [f"Common mistake {mk.code}: {mk.title}. {mk.description} Correct practice: {mk.correct_practice}" for mk in mistakes])
+    # SOP documents live in SOPGalaxy, not a table this backend queries — the
+    # only SOP-related signal in context is each activity's own sop_link.
+    context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" + (f"; SOP: {a.sop_link}" if a.sop_link else "") for a in activities] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules] + [f"Common mistake {mk.code}: {mk.title}. {mk.description} Correct practice: {mk.correct_practice}" for mk in mistakes])
     ai_answer = await claude_summary(payload.query, context) if context else None
-    audit(db, user, "knowledge.search", "search", details={"query": payload.query, "result_count": len(activities) + len(sops) + len(modules) + len(mistakes), "ai_used": bool(ai_answer)}); db.commit()
-    return {"query": payload.query, "answer": ai_answer or (f"Verified results found for {payload.query}. Use the official owner, channel and SLA below." if context else "No confirmed answer was found. Report this question for owner review."), "confidence": 0.93 if activities else 0.72 if context else 0.0, "ai_used": bool(ai_answer), "activities": [activity_dict(a) for a in activities], "sops": [sop_dict(s) for s in sops], "modules": [module_dict(m) for m in modules], "mistakes": [row_dict(mk) for mk in mistakes], "unresolved": not bool(context)}
+    audit(db, user, "knowledge.search", "search", details={"query": payload.query, "result_count": len(activities) + len(modules) + len(mistakes), "ai_used": bool(ai_answer)}); db.commit()
+    return {"query": payload.query, "answer": ai_answer or (f"Verified results found for {payload.query}. Use the official owner, channel and SLA below." if context else "No confirmed answer was found. Report this question for owner review."), "confidence": 0.93 if activities else 0.72 if context else 0.0, "ai_used": bool(ai_answer), "activities": [activity_dict(a) for a in activities], "modules": [module_dict(m) for m in modules], "mistakes": [row_dict(mk) for mk in mistakes], "unresolved": not bool(context)}
 
 
 @app.post("/api/v1/feedback", status_code=201)
@@ -345,11 +303,14 @@ def create_feedback(payload: FeedbackRequest, user: User = Depends(current_user)
 
 @app.get("/api/v1/admin/analytics")
 def analytics(user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    employees = db.scalar(select(func.count()).select_from(User).where(User.org_id == user.org_id, User.role == "employee")) or 0
+    # Counts every org member (matches the Employees list, which also
+    # includes admins) — matches the same fix already shipped in the
+    # Supabase Edge Function this backend mirrors.
+    employees = db.scalar(select(func.count()).select_from(User).where(User.org_id == user.org_id)) or 0
     total_enrollments = db.scalar(select(func.count()).select_from(Enrollment).where(Enrollment.org_id == user.org_id)) or 0
     complete = db.scalar(select(func.count()).select_from(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.status == "completed")) or 0
     average = db.scalar(select(func.avg(QuizAttempt.score)).where(QuizAttempt.org_id == user.org_id)) or 0
-    return {"employees": employees, "training_completion": round(complete / total_enrollments * 100) if total_enrollments else 0, "certificates": db.scalar(select(func.count()).select_from(Certificate).where(Certificate.org_id == user.org_id)) or 0, "average_quiz_score": round(float(average), 1), "open_feedback": db.scalar(select(func.count()).select_from(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.status == "open")) or 0, "activities": db.scalar(select(func.count()).select_from(Activity).where(Activity.org_id == user.org_id)) or 0, "sops": db.scalar(select(func.count()).select_from(SOPDocument).where(SOPDocument.org_id == user.org_id)) or 0}
+    return {"employees": employees, "training_completion": round(complete / total_enrollments * 100) if total_enrollments else 0, "certificates": db.scalar(select(func.count()).select_from(Certificate).where(Certificate.org_id == user.org_id)) or 0, "average_quiz_score": round(float(average), 1), "open_feedback": db.scalar(select(func.count()).select_from(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.status == "open")) or 0, "activities": db.scalar(select(func.count()).select_from(Activity).where(Activity.org_id == user.org_id)) or 0}
 
 
 @app.get("/api/v1/admin/audit")

@@ -46,8 +46,6 @@ def test_new_organization_signup_provisions_a_working_tenant():
         # A brand-new tenant starts with no company-specific data of its own.
         activities = client.get("/api/v1/activities", headers=auth(token)).json()
         assert activities == []
-        sops = client.get("/api/v1/sops", headers=auth(token)).json()
-        assert sops == []
 
         # Sign back in normally afterwards, same as any other account.
         relogin = client.post("/api/v1/auth/login", json={"email": "jordan@acme-robotics.com", "password": "FoundingAdmin1", "organization": "acme-robotics"})

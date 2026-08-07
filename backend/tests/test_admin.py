@@ -100,34 +100,6 @@ def test_responsibility_matrix_editor():
         assert any(a["id"] == activity_id for a in listing)
 
 
-def test_sop_approval_workflow():
-    with TestClient(app) as client:
-        token = login(client)
-        created = client.post("/api/v1/admin/sops", headers=auth(token), json={
-            "code": "SOP-99", "title": "Remote Work Equipment", "department": "Information Technology",
-            "owner_role": "IT Manager", "approver_role": "Head of IT", "summary": "Controls remote equipment issuance.",
-        })
-        assert created.status_code == 201
-        sop_id = created.json()["id"]
-        assert created.json()["status"] == "draft"
-
-        cannot_approve_yet = client.post(f"/api/v1/admin/sops/{sop_id}/approve", headers=auth(token))
-        assert cannot_approve_yet.status_code == 409
-
-        submitted = client.post(f"/api/v1/admin/sops/{sop_id}/submit", headers=auth(token))
-        assert submitted.status_code == 200
-        assert submitted.json()["status"] == "in_review"
-
-        approved = client.post(f"/api/v1/admin/sops/{sop_id}/approve", headers=auth(token))
-        assert approved.status_code == 200
-        assert approved.json()["status"] == "effective"
-        assert approved.json()["approved_by"]
-
-        retired = client.post(f"/api/v1/admin/sops/{sop_id}/retire", headers=auth(token))
-        assert retired.status_code == 200
-        assert retired.json()["status"] == "archived"
-
-
 def test_module_and_quiz_builder_creates_locked_enrollments():
     with TestClient(app) as client:
         token = login(client)

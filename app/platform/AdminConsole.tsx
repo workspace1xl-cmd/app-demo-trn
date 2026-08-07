@@ -561,7 +561,7 @@ function MatrixPanel({ token }: { token: string }) {
     { key: "sla", label: "SLA", type: "text", required: true, placeholder: "e.g. 2 business days" },
     { key: "escalation_level_1", label: "Escalation Level 1", type: "text", required: true },
     { key: "escalation_level_2", label: "Escalation Level 2", type: "text", required: true },
-    { key: "sop_link", label: "SOP Link", type: "text" },
+    { key: "sop_link", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
     { key: "training_module_link", label: "Training Module Link", type: "text" },
   ];
   const editFields: FieldDef[] = [...fields, { key: "status", label: "Status", type: "select", options: [{ value: "draft", label: "Draft" }, { value: "confirmed", label: "Confirmed" }, { value: "archived", label: "Archived" }] }];
@@ -605,105 +605,13 @@ function MatrixPanel({ token }: { token: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// SOP editor and approval workflow
-// ---------------------------------------------------------------------------
-
-type Sop = { id: string; code: string; title: string; department: string; owner_role: string; approver_role: string; summary: string; version: string; status: string };
-
-function SopsPanel({ token }: { token: string }) {
-  const [reloadKey, setReloadKey] = useState(0);
-  const list = useClientList<Sop>(token, "/api/v1/sops", ["title", "code", "department"], reloadKey);
-  const [modal, setModal] = useState<null | { mode: "create" | "edit"; row?: Sop }>(null);
-  const [toast, setToast] = useState("");
-  const [workflowBusy, setWorkflowBusy] = useState<string | null>(null);
-  const [error, setError] = useState("");
-
-  const createFields: FieldDef[] = [
-    { key: "code", label: "SOP Code", type: "text", required: true, placeholder: "e.g. SOP-18" },
-    { key: "title", label: "Title", type: "text", required: true },
-    { key: "department", label: "Department", type: "text", required: true },
-    { key: "owner_role", label: "Owner Role", type: "text", required: true },
-    { key: "approver_role", label: "Approver Role", type: "text", required: true },
-    { key: "summary", label: "Summary", type: "textarea", required: true },
-  ];
-  const editFields: FieldDef[] = [
-    { key: "title", label: "Title", type: "text", required: true },
-    { key: "department", label: "Department", type: "text", required: true },
-    { key: "owner_role", label: "Owner Role", type: "text", required: true },
-    { key: "approver_role", label: "Approver Role", type: "text", required: true },
-    { key: "summary", label: "Summary", type: "textarea", required: true },
-  ];
-
-  const NEXT_ACTION: Record<string, { action: string; label: string } | null> = {
-    draft: { action: "submit", label: "Submit for Review" },
-    in_review: { action: "approve", label: "Approve" },
-    effective: { action: "retire", label: "Retire" },
-    approved: { action: "retire", label: "Retire" },
-    archived: null,
-  };
-
-  async function runWorkflow(row: Sop, action: string) {
-    setWorkflowBusy(row.id); setError("");
-    try {
-      await submitJson(`/api/v1/admin/sops/${row.id}/${action}`, token, "POST");
-      setToast(`SOP ${row.code} moved to ${action === "submit" ? "in review" : action === "approve" ? "effective" : "archived"} status successfully.`);
-      setTimeout(() => setToast(""), 3000);
-      setReloadKey((k) => k + 1);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update the SOP status.");
-    } finally {
-      setWorkflowBusy(null);
-    }
-  }
-
-  return (
-    <section>
-      <Toolbar q={list.q} onSearch={list.setQ} placeholder="Search SOPs" createLabel="+ Add SOP" onCreate={() => setModal({ mode: "create" })} />
-      <Feedback error={list.error || error} toast={toast} />
-      <DataTable
-        columns={[
-          { key: "code", label: "Code" },
-          { key: "title", label: "Title", render: (row) => (<><b>{row.title}</b><small>{row.department} · v{row.version}</small></>) },
-          { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
-        ]}
-        rows={list.items}
-        rowId={(row) => row.id}
-        loading={list.loading}
-        actions={(row) => {
-          const next = NEXT_ACTION[row.status];
-          return (
-            <div className={styles.workflowRow}>
-              <button className={styles.iconBtn} data-tip="Edit" onClick={() => setModal({ mode: "edit", row })}>✎</button>
-              {next && (
-                <button className={styles.secondaryBtn} disabled={workflowBusy === row.id} onClick={() => runWorkflow(row, next.action)}>
-                  {workflowBusy === row.id ? "Working…" : next.label}
-                </button>
-              )}
-            </div>
-          );
-        }}
-      />
-      <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
-      {modal && (
-        <FormModal
-          title={modal.mode === "create" ? "Add SOP" : `Edit ${modal.row?.code}`}
-          fields={modal.mode === "create" ? createFields : editFields}
-          initialValues={modal.row || {}}
-          submitLabel={modal.mode === "create" ? "Create SOP" : "Save Changes"}
-          onCancel={() => setModal(null)}
-          onSubmit={async (values) => {
-            if (modal.mode === "create") await submitJson("/api/v1/admin/sops", token, "POST", values);
-            else await submitJson(`/api/v1/admin/sops/${modal.row!.id}`, token, "PATCH", values);
-            setToast(`SOP ${modal.mode === "create" ? "created" : "updated"} successfully.`);
-            setTimeout(() => setToast(""), 3000);
-            setModal(null); setReloadKey((k) => k + 1);
-          }}
-        />
-      )}
-    </section>
-  );
-}
+// SOP body/versioning/document management is deliberately not built here —
+// SOPGalaxy (https://app.sopgalaxy.com/) owns SOP documents. OneWork keeps
+// only a plain-text link field on each Responsibility Matrix row (see
+// MatrixPanel's "sop_link" field above) pointing into it. The former
+// in-house SOP repository (metadata table + draft/review/approve/retire
+// workflow) has been removed, not left running in parallel — see
+// supabase/migrations/20260807100000_drop_sop_repository.sql.
 
 // ---------------------------------------------------------------------------
 // Training module and quiz builder
@@ -1548,7 +1456,6 @@ export default function AdminConsole({ token, section }: { token: string; sectio
     case "employees": return <EmployeesPanel token={token} />;
     case "departments": return <DepartmentsPanel token={token} />;
     case "matrix": return <MatrixPanel token={token} />;
-    case "sops": return <SopsPanel token={token} />;
     case "training": return <TrainingPanel token={token} />;
     case "assignments": return <AssignmentsPanel token={token} />;
     case "content": return <ContentSection token={token} />;
