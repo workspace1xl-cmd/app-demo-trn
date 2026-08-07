@@ -28,11 +28,18 @@ function parseApiError(body: unknown): { message: string; field?: string } {
 }
 
 async function submitJson(path: string, token: string, method: string, body?: unknown) {
-  const response = await fetch(`${API}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    // Same rationale as request() in page.tsx: don't let a raw browser
+    // network-error string ("Failed to fetch") reach the admin console.
+    throw new Error("Could not reach the server. Check your connection and try again.");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const parsed = parseApiError(data);
@@ -1501,7 +1508,15 @@ function AuditPanel({ token }: { token: string }) {
       <Feedback error={list.error} />
       <DataTable
         columns={[
-          { key: "created_at", label: "When", render: (row) => new Date(row.created_at).toLocaleString("en-GB") },
+          {
+            key: "created_at",
+            label: "When",
+            // Same date format as everywhere else (formatDate: "07 Aug 2026"),
+            // plus a time — this used to be the one screen rendering
+            // "07/08/2026, 15:49:26" while Certificates showed a raw ISO
+            // string and Content Library showed "07 Aug 2026".
+            render: (row) => `${formatDate(row.created_at)}, ${new Date(row.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`,
+          },
           { key: "actor", label: "Actor" },
           { key: "action", label: "Action" },
           { key: "entity_type", label: "Entity" },

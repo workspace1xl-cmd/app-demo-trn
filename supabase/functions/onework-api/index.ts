@@ -100,11 +100,17 @@ Deno.serve(async (req) => {
     }
 
     if (path === "/api/v1/dashboard") {
-      const [{ data: enrollment }, { count: certificateCount }] = await Promise.all([
+      const [{ data: enrollment }, { count: certificateCount }, { count: moduleCount }] = await Promise.all([
         supabase.from("enrollments").select("status,best_score").eq("org_id", user.org_id).eq("user_id", user.id),
         supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("user_id", user.id),
+        supabase.from("training_modules").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "published"),
       ]);
-      const total = enrollment?.length || 0, completed = enrollment?.filter((item) => item.status === "completed").length || 0;
+      // `total` used to be enrollment.length, which is 0 for anyone with no
+      // personal enrollment rows yet (e.g. admin accounts, which the seed
+      // never auto-enrolls) — "0/0 completed modules" while My Learning,
+      // fetched from training_modules directly, correctly lists all 22.
+      // The curriculum size (published modules) is the real denominator.
+      const total = moduleCount || 0, completed = enrollment?.filter((item) => item.status === "completed").length || 0;
       return json({ user: { name: user.full_name, role: user.role }, training: { completed, total, percent: total ? Math.round(completed / total * 100) : 0 }, certificates: certificateCount || 0, points: enrollment?.reduce((sum, item) => sum + (item.best_score || 0) * 5, 0) || 0, open_actions: enrollment?.filter((item) => ["assigned", "in_progress"].includes(item.status)).length || 0 });
     }
 

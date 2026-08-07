@@ -43,6 +43,15 @@ type SearchData = { query: string; confidence: number; answer: string; ai_used: 
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
 type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
 
+// Single date format for the whole app. Before this, Certificates showed
+// raw ISO ("2026-08-07"), the admin console showed "07 Aug 2026", and the
+// audit log showed "07/08/2026" — three formats across three screens.
+function formatDate(value?: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
 function youtubeEmbedUrl(url: string): string | null {
   const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{6,})/);
   return match ? `https://www.youtube.com/embed/${match[1]}` : null;
@@ -92,14 +101,23 @@ export async function request<T = PlatformData>(
   token?: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+    });
+  } catch {
+    // fetch() itself throws (offline, DNS, CORS, connection refused) with a
+    // raw browser string like "Failed to fetch" — every call in this app
+    // funnels through here, so catching it once at the source keeps that
+    // string from surfacing to users at all 18+ call sites individually.
+    throw new Error("Could not reach the server. Check your connection and try again.");
+  }
   if (!response.ok)
     throw new Error(
       (await response.json().catch(() => ({}))).detail || "Request failed",
@@ -182,13 +200,23 @@ export default function WorkingPlatform() {
     setBusy(true);
     setError("");
     try {
-      setData(
-        await request("/api/v1/search", session.access_token, {
+      const result = await request<SearchData>("/api/v1/search", session.access_token, {
+        method: "POST",
+        body: JSON.stringify({ query }),
+      });
+      setData(result);
+      // The UI tells the employee an unresolved question "has been logged
+      // for the knowledge team to review" — make that literally true by
+      // actually creating the feedback-queue record, instead of only
+      // computing an `unresolved` flag that nothing downstream used.
+      if (result.unresolved) {
+        request("/api/v1/feedback", session.access_token, {
           method: "POST",
-          body: JSON.stringify({ query }),
-        }),
-      );
+          body: JSON.stringify({ query, reason: "No verified organisational match was found for this question." }),
+        }).catch(() => {});
+      }
     } catch (e) {
+      setData(null); // don't leave the previous answer rendered under the new error
       setError(e instanceof Error ? e.message : "Search failed");
     } finally {
       setBusy(false);
@@ -386,6 +414,16 @@ export default function WorkingPlatform() {
           onClick={() => {
             sessionStorage.removeItem("onework-session");
             setSession(null);
+            // Logout only cleared the session token — the search box text,
+            // the last search result, any error banner, and which view/tab
+            // was open all survived into the next login in the same tab,
+            // so a second person signing in on a shared machine would see
+            // the previous person's query and answer for a moment.
+            setView("dashboard");
+            setData(null);
+            setError("");
+            setQuery("leave");
+            setAdminSection("overview");
           }}
         >
           Sign out
@@ -627,12 +665,12 @@ export default function WorkingPlatform() {
                     <small>
                       ISSUED
                       <br />
-                      <b>{c.issued_at}</b>
+                      <b>{formatDate(c.issued_at)}</b>
                     </small>
                     <small>
                       VALID UNTIL
                       <br />
-                      <b>{c.expires_at}</b>
+                      <b>{formatDate(c.expires_at)}</b>
                     </small>
                   </div>
                 </article>
