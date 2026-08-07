@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import {
   blueprintItems,
   curriculum,
@@ -242,9 +243,9 @@ export default function Home() {
             <h1>{title}</h1>
           </div>
           <div className="top-actions">
-            <a className="primary small" href="/platform">
+            <Link className="primary small" href="/platform">
               Open working platform
-            </a>
+            </Link>
             <label className="role-switch">
               <span>VIEWING AS</span>
               <select

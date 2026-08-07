@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import styles from "./platform.module.css";
-import { request } from "./page";
+import { request } from "./PlatformApp";
 
 type QuizQuestion = { id: string; prompt: string; options: string[] };
 type QuizPayload = { module_id: string; title: string; passing_score: number; questions: QuizQuestion[] };

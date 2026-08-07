@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useParams, usePathname, useRouter } from "next/navigation";
 import styles from "./platform.module.css";
 import AdminConsole from "./AdminConsole";
 import OrgSignup from "./OrgSignup";
@@ -21,6 +22,7 @@ type View =
   | "sops"
   | "certificates"
   | "admin";
+const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "sops", "certificates", "admin"];
 export type AdminSection =
   | "overview"
   | "employees"
@@ -32,6 +34,7 @@ export type AdminSection =
   | "content"
   | "feedback"
   | "audit";
+const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "matrix", "sops", "training", "assignments", "content", "feedback", "audit"];
 
 type Activity = {
   id: string; name: string; department: string; responsible_role: string;
@@ -126,8 +129,32 @@ export async function request<T = PlatformData>(
 }
 
 export default function WorkingPlatform() {
+  const router = useRouter();
+  const pathname = usePathname();
+  // `slug` is the catch-all segment array from app/platform/[[...slug]]/page.tsx:
+  // /platform -> undefined, /platform/training -> ["training"],
+  // /platform/admin/employees -> ["admin", "employees"]. The URL is the single
+  // source of truth for which screen is showing — there is deliberately no
+  // separate `view`/`adminSection` React state to keep in sync with it, which
+  // is what let the two drift apart before (browser back/forward, a stale
+  // render, or a missed call site could each show one screen while state
+  // said another).
+  const params = useParams<{ slug?: string[] }>();
+  const slug = params?.slug;
+  const rawView = slug?.[0];
+  const view: View = (VIEW_IDS as string[]).includes(rawView ?? "") ? (rawView as View) : "dashboard";
+  const rawSection = slug?.[1];
+  const adminSection: AdminSection =
+    view === "admin" && (ADMIN_SECTION_IDS as string[]).includes(rawSection ?? "") ? (rawSection as AdminSection) : "overview";
+
+  function goToView(id: View) {
+    router.push(`/platform/${id}`);
+  }
+  function goToAdminSection(id: AdminSection) {
+    router.push(`/platform/admin/${id}`);
+  }
+
   const [session, setSession] = useState<Session | null>(null);
-  const [view, setView] = useState<View>("dashboard");
   const [email, setEmail] = useState("employee@company.com");
   const [password, setPassword] = useState("Demo123!");
   const [busy, setBusy] = useState(false);
@@ -135,11 +162,26 @@ export default function WorkingPlatform() {
   const [data, setData] = useState<PlatformData>(null);
   const [query, setQuery] = useState("leave");
   const [toast, setToast] = useState("");
-  const [adminSection, setAdminSection] = useState<AdminSection>("overview");
   const [showSignup, setShowSignup] = useState(false);
   const [activeQuizModule, setActiveQuizModule] = useState<string | null>(null);
   const [activeVideo, setActiveVideo] = useState<ModuleResource | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  // Reset whatever the previous screen had loaded as soon as the
+  // URL-derived view changes — via a nav click, the browser Back/Forward
+  // buttons, or a direct deep link — before this render commits. Without
+  // this, the previous view's data would render for one frame under the
+  // new view's markup (wrong shape, sometimes a crash); doing it here
+  // (React's documented pattern for "adjust state when a derived value
+  // changes", not inside a useEffect) covers every navigation path,
+  // including back/forward, in the same render rather than a tick later.
+  const [resetForView, setResetForView] = useState(view);
+  if (view !== resetForView) {
+    setResetForView(view);
+    setData(null);
+    setError("");
+  }
 
   useEffect(() => {
     const saved = sessionStorage.getItem("onework-session");
@@ -147,6 +189,24 @@ export default function WorkingPlatform() {
     const timer = window.setTimeout(() => setSession(JSON.parse(saved) as Session), 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  // Once a session exists, /platform itself (no slug) is never the "real"
+  // URL for anything — redirect it to the role-appropriate default so the
+  // address bar always accurately names what's on screen. router.replace
+  // (not push) so this redirect doesn't add a Back-button step.
+  useEffect(() => {
+    if (session && !slug) {
+      router.replace(session.user.role === "admin" ? "/platform/admin" : "/platform/dashboard");
+    }
+  }, [session, slug, router]);
+
+  // Accessibility: move focus to the new screen's heading on every route
+  // change, matching how a full page navigation would behave. Without this,
+  // a keyboard/screen-reader user's focus silently stays on the sidebar
+  // button they just activated instead of moving into the new content.
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [view, adminSection]);
 
   useEffect(() => {
     if (!session) return;
@@ -186,7 +246,18 @@ export default function WorkingPlatform() {
       });
       setSession(next);
       sessionStorage.setItem("onework-session", JSON.stringify(next));
-      setView(next.user.role === "admin" ? "admin" : "dashboard");
+      // Deep-linking: someone who followed a link to e.g. /platform/training
+      // before signing in should land there after login, not always on the
+      // role default — unless that link points into /platform/admin and
+      // they're not actually an admin.
+      const wantsAdmin = pathname?.startsWith("/platform/admin");
+      const target =
+        pathname && pathname !== "/platform" && !(wantsAdmin && next.user.role !== "admin")
+          ? pathname
+          : next.user.role === "admin"
+            ? "/platform/admin"
+            : "/platform/dashboard";
+      router.push(target);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Login failed");
     } finally {
@@ -230,10 +301,7 @@ export default function WorkingPlatform() {
     );
     setTimeout(() => setToast(""), 3500);
     setReloadKey((k) => k + 1);
-    if (result.passed) {
-      setData(null);
-      setView("certificates");
-    }
+    if (result.passed) goToView("certificates");
   }
 
   if (!session && showSignup)
@@ -261,7 +329,7 @@ export default function WorkingPlatform() {
           onSignedUp={(next) => {
             setSession(next);
             sessionStorage.setItem("onework-session", JSON.stringify(next));
-            setView("admin");
+            router.push("/platform/admin");
             setShowSignup(false);
           }}
         />
@@ -375,14 +443,7 @@ export default function WorkingPlatform() {
   return (
     <main className={styles.shell}>
       <aside>
-        <button
-          type="button"
-          className={styles.logo}
-          onClick={() => {
-            setData(null);
-            setView("dashboard");
-          }}
-        >
+        <button type="button" className={styles.logo} onClick={() => goToView("dashboard")}>
           <span>1</span>
           <b>
             OneWork<small>LIVE PLATFORM</small>
@@ -394,10 +455,7 @@ export default function WorkingPlatform() {
               className={view === id ? styles.active : ""}
               key={id}
               title={label}
-              onClick={() => {
-                setData(null);
-                setView(id);
-              }}
+              onClick={() => goToView(id)}
             >
               <span>{icon}</span>
               {label}
@@ -421,16 +479,16 @@ export default function WorkingPlatform() {
           onClick={() => {
             sessionStorage.removeItem("onework-session");
             setSession(null);
-            // Logout only cleared the session token — the search box text,
-            // the last search result, any error banner, and which view/tab
-            // was open all survived into the next login in the same tab,
-            // so a second person signing in on a shared machine would see
-            // the previous person's query and answer for a moment.
-            setView("dashboard");
+            // Logout only used to clear the session token — the search box
+            // text, the last search result, and any error banner all
+            // survived into the next login in the same tab, so a second
+            // person signing in on a shared machine would briefly see the
+            // previous person's query and answer. (Which view/tab was open
+            // is now URL state, reset below by navigating to /platform.)
             setData(null);
             setError("");
             setQuery("leave");
-            setAdminSection("overview");
+            router.push("/platform");
           }}
         >
           Sign out
@@ -440,7 +498,7 @@ export default function WorkingPlatform() {
         <header>
           <div>
             <small>{(session.user.org_name || "YOUR ORGANISATION").toUpperCase()} · LIVE DATA</small>
-            <h1>{nav.find((x) => x[0] === view)?.[2]}</h1>
+            <h1 ref={headingRef} tabIndex={-1}>{nav.find((x) => x[0] === view)?.[2]}</h1>
           </div>
         </header>
         <div className={styles.content}>
@@ -708,7 +766,7 @@ export default function WorkingPlatform() {
                 <button
                   key={id}
                   className={adminSection === id ? styles.adminTabActive : ""}
-                  onClick={() => setAdminSection(id)}
+                  onClick={() => goToAdminSection(id)}
                 >
                   {label}
                 </button>

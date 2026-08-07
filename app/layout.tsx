@@ -22,5 +22,11 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body></html>;
+  // data-scroll-behavior tells Next's router this smooth-scroll CSS is
+  // intentional, so it still resets scroll position correctly on route
+  // changes instead of smooth-scrolling awkwardly between unrelated pages.
+  // Only became relevant once /platform got real client-side route
+  // transitions (previously the whole app was one URL, so the router
+  // never had a "route change" to reconcile this with).
+  return <html lang="en" data-scroll-behavior="smooth"><body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body></html>;
 }

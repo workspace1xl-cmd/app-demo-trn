@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import styles from "./platform.module.css";
-import { API } from "./page";
+import { API } from "./PlatformApp";
 
 type SignupSession = {
   access_token: string;
