@@ -833,6 +833,7 @@ function TrainingPanel({ token }: { token: string }) {
   const list = useClientList<TrainingModuleRow>(token, "/api/v1/training/modules", ["title", "code"], reloadKey);
   const [modal, setModal] = useState<null | { mode: "create" | "edit"; row?: TrainingModuleRow }>(null);
   const [quizModule, setQuizModule] = useState<TrainingModuleRow | null>(null);
+  const [resourceModule, setResourceModule] = useState<TrainingModuleRow | null>(null);
   const [toast, setToast] = useState("");
 
   const createFields: FieldDef[] = [
@@ -868,6 +869,7 @@ function TrainingPanel({ token }: { token: string }) {
           <div className={styles.workflowRow}>
             <button className={styles.iconBtn} data-tip="Edit" onClick={() => setModal({ mode: "edit", row })}>✎</button>
             <button className={styles.iconBtn} data-tip="Quiz builder" onClick={() => setQuizModule(row)}>❓</button>
+            <button className={styles.iconBtn} data-tip="Videos & documents" onClick={() => setResourceModule(row)}>🎬</button>
           </div>
         )}
       />
@@ -890,7 +892,107 @@ function TrainingPanel({ token }: { token: string }) {
         />
       )}
       {quizModule && <QuizBuilderModal token={token} module={quizModule} onClose={() => setQuizModule(null)} />}
+      {resourceModule && <ResourcesModal token={token} module={resourceModule} onClose={() => setResourceModule(null)} />}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Module video/document resources — including YouTube and other external links
+// ---------------------------------------------------------------------------
+type ModuleResourceRow = { id: string; resource_type: string; sequence: number; asset: { id: string; title: string; kind: string; mime_type: string | null; status: string } | null };
+
+const RESOURCE_KIND_OPTIONS = [
+  { value: "video", label: "Video (e.g. YouTube link)" },
+  { value: "document", label: "Document link" },
+  { value: "template", label: "Template link" },
+  { value: "image", label: "Image link" },
+];
+
+function ResourcesModal({ token, module, onClose }: { token: string; module: TrainingModuleRow; onClose: () => void }) {
+  const [resources, setResources] = useState<ModuleResourceRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<ModuleResourceRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  function load() {
+    setLoading(true);
+    request<ModuleResourceRow[]>(`/api/v1/admin/training/modules/${module.id}/resources`, token)
+      .then(setResources).catch((e) => setError(e instanceof Error ? e.message : "Could not load resources.")).finally(() => setLoading(false));
+  }
+  useEffect(() => {
+    const timer = window.setTimeout(load, 0);
+    return () => window.clearTimeout(timer);
+  }, [module.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <Modal title={`Videos & documents — ${module.code} ${module.title}`} onClose={onClose} wide>
+      <div className={styles.modalBody}>
+        <Feedback error={error} toast={toast} />
+        <div className={styles.toolbar}>
+          <span style={{ fontSize: 9, color: "#8b8f9e" }}>Paste a YouTube link or any hosted video/document URL — no file upload needed.</span>
+          <button type="button" className={styles.primaryBtn} onClick={() => setAddOpen(true)}>+ Add Link</button>
+        </div>
+        <DataTable
+          columns={[
+            { key: "title", label: "Title", render: (row) => row.asset?.title || "—" },
+            { key: "kind", label: "Type", render: (row) => <StatusBadge status={row.asset?.kind} /> },
+            { key: "resource_type", label: "Shown As", render: (row) => <StatusBadge status={row.resource_type} /> },
+          ]}
+          rows={resources}
+          rowId={(row) => row.id}
+          loading={loading}
+          actions={(row) => (
+            <button className={styles.iconBtn} data-tip="Remove" data-danger="true" onClick={() => setConfirmDelete(row)}>🗑</button>
+          )}
+        />
+      </div>
+      <div className={styles.modalFooter}>
+        <button type="button" className={styles.secondaryBtn} onClick={onClose}>Close</button>
+      </div>
+      {addOpen && (
+        <FormModal
+          title="Add Video or Document Link"
+          fields={[
+            { key: "title", label: "Title", type: "text", required: true, placeholder: "e.g. Leave Request Walkthrough" },
+            { key: "kind", label: "Content Type", type: "select", required: true, options: RESOURCE_KIND_OPTIONS },
+            { key: "external_url", label: "Link (YouTube or any URL)", type: "text", required: true, placeholder: "https://www.youtube.com/watch?v=..." },
+          ]}
+          initialValues={{ kind: "video" }}
+          submitLabel="Add to Module"
+          onCancel={() => setAddOpen(false)}
+          onSubmit={async (values) => {
+            const asset = await submitJson("/api/v1/admin/content/external", token, "POST", { title: values.title, kind: values.kind, external_url: values.external_url });
+            await submitJson(`/api/v1/admin/training/modules/${module.id}/resources`, token, "POST", { asset_id: asset.id, resource_type: values.kind === "video" ? "video" : "document" });
+            setAddOpen(false); load();
+            setToast("Added successfully."); setTimeout(() => setToast(""), 3000);
+          }}
+        />
+      )}
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Remove Resource"
+          message={`Are you sure you want to remove "${confirmDelete.asset?.title}" from this module?`}
+          busy={deleting}
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={async () => {
+            setDeleting(true);
+            try {
+              await submitJson(`/api/v1/admin/training/resources/${confirmDelete.id}`, token, "DELETE");
+              setConfirmDelete(null); load();
+              setToast("Removed successfully."); setTimeout(() => setToast(""), 3000);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not remove the resource.");
+            } finally {
+              setDeleting(false);
+            }
+          }}
+        />
+      )}
+    </Modal>
   );
 }
 
