@@ -397,7 +397,6 @@ export default function WorkingPlatform() {
             <small>{(session.user.org_name || "YOUR ORGANISATION").toUpperCase()} · LIVE DATA</small>
             <h1>{nav.find((x) => x[0] === view)?.[2]}</h1>
           </div>
-          <Link href="/">Open management blueprint ↗</Link>
         </header>
         <div className={styles.content}>
           {busy && (
