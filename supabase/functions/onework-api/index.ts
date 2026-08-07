@@ -19,14 +19,41 @@ async function authenticate(req: Request) {
   return user?.is_active && user.org_id === data?.org_id ? user : null;
 }
 
-async function claudeAnswer(question: string, context: string) {
+// Returns { answer, escalate } or null. `escalate` used to be guessed by
+// regex-matching Claude's free-text prose for phrases like "must be
+// escalated" — fragile and non-deterministic in practice: identical or
+// near-identical queries ("leave" vs "leave policy") got different verdicts
+// purely because Claude's *wording* varied between calls, sometimes
+// matching the regex, sometimes not, even when the retrieved context was
+// the same relevant record either time. Asking Claude to emit one fixed,
+// parsed token up front is a structured signal instead of a prose guess —
+// still Claude's own judgment call, but no longer at the mercy of how it
+// happens to phrase the sentence around it.
+async function claudeAnswer(question: string, context: string): Promise<{ answer: string; escalate: boolean } | null> {
   const key = Deno.env.get("ANTHROPIC_API_KEY");
   if (!key || !context) return null;
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify({ model: Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-4-5", max_tokens: 500, messages: [{ role: "user", content: `Answer only from the verified organisational context. If it is insufficient, say the question must be escalated.\nQuestion: ${question}\nContext:\n${context}` }] }) });
+    const prompt = `You answer employee questions using ONLY the verified organisational context below.
+Respond in exactly this format, with nothing before it:
+STATUS: ANSWER
+or
+STATUS: ESCALATE
+(blank line)
+<the answer, written normally for the employee>
+
+Use STATUS: ESCALATE only if the context contains no record that is actually relevant to the question. If the context includes a specific matching record, use STATUS: ANSWER even when the question is a short topic phrase rather than a full sentence (e.g. "leave policy" should be answered the same as "how do I request leave" if a matching record exists) — do not escalate merely because of phrasing.
+
+Question: ${question}
+Context:
+${context}`;
+    const response = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify({ model: Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-4-5", max_tokens: 500, messages: [{ role: "user", content: prompt }] }) });
     if (!response.ok) return null;
     const payload = await response.json();
-    return payload.content?.filter((block: { type: string }) => block.type === "text").map((block: { text: string }) => block.text).join("\n") || null;
+    const raw = payload.content?.filter((block: { type: string }) => block.type === "text").map((block: { text: string }) => block.text).join("\n") || null;
+    if (!raw) return null;
+    const match = raw.match(/^STATUS:\s*(ANSWER|ESCALATE)\s*\n+([\s\S]*)$/i);
+    if (!match) return { answer: raw.trim(), escalate: false }; // model didn't follow the format; treat the raw text as a best-effort answer
+    return { answer: match[2].trim(), escalate: match[1].toUpperCase() === "ESCALATE" };
   } catch { return null; }
 }
 
@@ -214,18 +241,17 @@ Deno.serve(async (req) => {
         supabase.from("mistake_register").select("code,title,description,correct_practice,severity").eq("org_id", user.org_id).eq("status", "active").or(mistakeFilters).limit(3),
       ]);
       const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}`), ...(sops || []).map((s) => `SOP: ${s.code} ${s.title}; ${s.summary}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`)].join("\n");
-      const answer = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (sops?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0);
-      // The prompt explicitly tells Claude to say the question must be
-      // escalated when the context is insufficient. Previously nothing
-      // downstream checked for that phrase, so a refusal was still shown
-      // to the employee labelled "VERIFIED ORGANISATIONAL ANSWER · 72%
-      // CONFIDENCE" whenever a weak, unrelated keyword match kept `count`
-      // above zero. A refusal is a refusal regardless of how many rows a
-      // fuzzy ILIKE happened to touch.
-      const isEscalation = Boolean(answer && /must be escalated|cannot (find|confirm)|no (confirmed|verified) answer|insufficient (information|context)/i.test(answer));
-      const unresolved = count === 0 || isEscalation;
-      await audit(user, "knowledge.search", "search", undefined, { query: safe, result_count: count, ai_used: Boolean(answer), unresolved });
-      return json({ query: safe, answer: answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(answer), activities: activities || [], sops: sops || [], modules: modules || [], mistakes: mistakes || [], unresolved });
+      const claude = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (sops?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0);
+      // `escalate` now comes from a fixed STATUS: token Claude is asked to
+      // emit first, parsed exactly — not guessed by regex-matching whatever
+      // prose Claude happened to write. The regex approach was genuinely
+      // non-deterministic in production: "leave" and "leave policy" hit the
+      // same matched activity but got different verdicts purely because
+      // Claude's *phrasing* of the same underlying answer varied between
+      // calls, sometimes tripping the regex and sometimes not.
+      const unresolved = count === 0 || (claude?.escalate ?? false);
+      await audit(user, "knowledge.search", "search", undefined, { query: safe, result_count: count, ai_used: Boolean(claude), unresolved });
+      return json({ query: safe, answer: claude?.answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(claude), activities: activities || [], sops: sops || [], modules: modules || [], mistakes: mistakes || [], unresolved });
     }
 
     if (path === "/api/v1/feedback" && req.method === "POST") {

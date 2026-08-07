@@ -332,7 +332,7 @@ function FormModal({ title, fields, initialValues, submitLabel, onCancel, onSubm
 // Paginated / client-side list hooks
 // ---------------------------------------------------------------------------
 
-function usePagedList<T>(token: string, buildPath: (page: number, size: number, q: string) => string, reloadKey: number) {
+function usePagedList<T>(token: string, buildPath: (page: number, size: number, q: string) => string, reloadKey: number, filterKey: string | number = "") {
   const [items, setItems] = useState<T[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -341,6 +341,14 @@ function usePagedList<T>(token: string, buildPath: (page: number, size: number, 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  // `buildPath` closes over each caller's own filter state (statusFilter,
+  // moduleFilter, kindFilter, ...), but the fetch effect below never
+  // depended on any of that — only on page/pageSize/q/reloadKey/token —
+  // so switching tabs (e.g. Feedback Queue's open/in review/resolved/
+  // dismissed) changed the URL buildPath *would* produce without ever
+  // re-running the effect that calls it. The list just kept showing
+  // whatever the first fetch returned. `filterKey` is the caller's own
+  // filter value, passed in explicitly so it's a real dependency.
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setLoading(true); setError("");
@@ -350,7 +358,7 @@ function usePagedList<T>(token: string, buildPath: (page: number, size: number, 
         .finally(() => setLoading(false));
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [token, page, pageSize, q, reloadKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token, page, pageSize, q, reloadKey, filterKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { items, page, setPage, pageSize, setPageSize: (s: number) => { setPageSize(s); setPage(1); }, total, q, setQ: (v: string) => { setQ(v); setPage(1); }, loading, error };
 }
@@ -1027,7 +1035,7 @@ type EnrollmentRow = { id: string; status: string; progress_percent: number; bes
 function AssignmentsPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [moduleFilter, setModuleFilter] = useState("");
-  const list = usePagedList<EnrollmentRow>(token, (page, size) => `/api/v1/admin/enrollments?page=${page}&page_size=${size}${moduleFilter ? `&module_id=${moduleFilter}` : ""}`, reloadKey + (moduleFilter ? 1000 : 0));
+  const list = usePagedList<EnrollmentRow>(token, (page, size) => `/api/v1/admin/enrollments?page=${page}&page_size=${size}${moduleFilter ? `&module_id=${moduleFilter}` : ""}`, reloadKey, moduleFilter);
   const modules = useLookup<TrainingModuleRow>(token, "/api/v1/training/modules");
   const [employeeList, setEmployeeList] = useState<{ id: string; full_name: string }[]>([]);
   useEffect(() => {
@@ -1170,7 +1178,7 @@ type FeedbackRow = { id: string; query: string; reason: string; status: string; 
 function FeedbackPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [statusFilter, setStatusFilter] = useState("open");
-  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&status=${statusFilter}`, reloadKey);
+  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&status=${statusFilter}`, reloadKey, statusFilter);
   const [resolveRow, setResolveRow] = useState<FeedbackRow | null>(null);
   const [toast, setToast] = useState("");
 
@@ -1321,7 +1329,7 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
 function ContentLibraryPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [kindFilter, setKindFilter] = useState("");
-  const list = usePagedList<ContentAsset>(token, (page, size) => `/api/v1/admin/content?page=${page}&page_size=${size}${kindFilter ? `&kind=${kindFilter}` : ""}`, reloadKey);
+  const list = usePagedList<ContentAsset>(token, (page, size) => `/api/v1/admin/content?page=${page}&page_size=${size}${kindFilter ? `&kind=${kindFilter}` : ""}`, reloadKey, kindFilter);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ContentAsset | null>(null);
   const [deleting, setDeleting] = useState(false);
