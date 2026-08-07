@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import styles from "./platform.module.css";
 import AdminConsole from "./AdminConsole";
+import QuizPlayer from "./QuizPlayer";
 
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -38,7 +39,13 @@ type Activity = {
 };
 type DashboardData = { user: { name: string }; training: { percent: number; completed: number; total: number }; certificates: number; points: number; open_actions: number };
 type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[] };
-type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null };
+type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
+type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
+
+function youtubeEmbedUrl(url: string): string | null {
+  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{6,})/);
+  return match ? `https://www.youtube.com/embed/${match[1]}` : null;
+}
 type Sop = { id: string; code: string; department: string; title: string; summary: string; version: string; status: string };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
 type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; sops: number; open_feedback: number };
@@ -75,6 +82,9 @@ export default function WorkingPlatform() {
   const [query, setQuery] = useState("leave");
   const [toast, setToast] = useState("");
   const [adminSection, setAdminSection] = useState<AdminSection>("overview");
+  const [activeQuizModule, setActiveQuizModule] = useState<string | null>(null);
+  const [activeVideo, setActiveVideo] = useState<ModuleResource | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     const saved = sessionStorage.getItem("onework-session");
@@ -104,7 +114,7 @@ export default function WorkingPlatform() {
         .finally(() => setBusy(false));
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [session, view]);
+  }, [session, view, reloadKey]);
 
   async function login(event: FormEvent) {
     event.preventDefault();
@@ -148,32 +158,14 @@ export default function WorkingPlatform() {
     }
   }
 
-  async function takeQuiz(moduleId: string) {
-    if (!session) return;
-    setBusy(true);
-    try {
-      const quiz = await request<{ questions: { id: string }[] }>(
-        `/api/v1/training/modules/${moduleId}/quiz`,
-        session.access_token,
-      );
-      const result = await request<{ score: number; passed: boolean }>(
-        `/api/v1/training/modules/${moduleId}/attempt`,
-        session.access_token,
-        {
-          method: "POST",
-          body: JSON.stringify({ answers: quiz.questions.map(() => 0) }),
-        },
-      );
-      setToast(
-        `Assessment submitted: ${result.score}% · ${result.passed ? "Passed" : "Retake required"}`,
-      );
-      setTimeout(() => setToast(""), 3500);
-      setView("certificates");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Assessment failed");
-    } finally {
-      setBusy(false);
-    }
+  function handleQuizCompleted(result: { score: number; passed: boolean }) {
+    setActiveQuizModule(null);
+    setToast(
+      `Assessment submitted: ${result.score}% · ${result.passed ? "Passed" : "Retake required"}`,
+    );
+    setTimeout(() => setToast(""), 3500);
+    setReloadKey((k) => k + 1);
+    if (result.passed) setView("certificates");
   }
 
   if (!session)
@@ -289,6 +281,7 @@ export default function WorkingPlatform() {
             <button
               className={view === id ? styles.active : ""}
               key={id}
+              title={label}
               onClick={() => setView(id)}
             >
               <span>{icon}</span>
@@ -427,6 +420,33 @@ export default function WorkingPlatform() {
                     </small>
                     <h3>{m.title}</h3>
                     <p>{m.objective}</p>
+                    {m.resources && m.resources.length > 0 && (
+                      <div className={styles.moduleResources}>
+                        {m.resources.map((resource, index) =>
+                          resource.kind === "video" && resource.url ? (
+                            <button
+                              key={index}
+                              type="button"
+                              className={styles.resourceChip}
+                              onClick={() => setActiveVideo(resource)}
+                            >
+                              ▶ {resource.title}
+                            </button>
+                          ) : (
+                            <a
+                              key={index}
+                              href={resource.url ?? "#"}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={styles.resourceChip}
+                              onClick={(e) => { if (!resource.url) e.preventDefault(); }}
+                            >
+                              📄 {resource.title}
+                            </a>
+                          ),
+                        )}
+                      </div>
+                    )}
                     <i>
                       <b style={{ width: `${m.progress?.progress_percent ?? m.progress?.percent ?? 0}%` }} />
                     </i>
@@ -440,7 +460,7 @@ export default function WorkingPlatform() {
                     </b>
                     <button
                       disabled={m.progress?.status === "locked"}
-                      onClick={() => takeQuiz(m.id)}
+                      onClick={() => setActiveQuizModule(m.id)}
                     >
                       {m.progress?.status === "completed"
                         ? "Retake quiz"
@@ -605,6 +625,36 @@ export default function WorkingPlatform() {
         </div>
       </section>
       {toast && <div className={styles.toast}>✓ {toast}</div>}
+      {activeVideo && (
+        <div className={styles.modalOverlay} onMouseDown={(e) => { if (e.target === e.currentTarget) setActiveVideo(null); }}>
+          <div className={styles.modalPanel} data-wide="true">
+            <div className={styles.modalHeader}>
+              <h3>{activeVideo.title}</h3>
+              <button type="button" onClick={() => setActiveVideo(null)} aria-label="Close">✕</button>
+            </div>
+            <div className={styles.videoFrame}>
+              {activeVideo.url && youtubeEmbedUrl(activeVideo.url) ? (
+                <iframe
+                  src={youtubeEmbedUrl(activeVideo.url)!}
+                  title={activeVideo.title}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              ) : (
+                <video src={activeVideo.url ?? undefined} controls />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {activeQuizModule && (
+        <QuizPlayer
+          moduleId={activeQuizModule}
+          token={session.access_token}
+          onClose={() => setActiveQuizModule(null)}
+          onCompleted={handleQuizCompleted}
+        />
+      )}
     </main>
   );
 }
