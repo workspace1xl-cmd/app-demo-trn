@@ -435,7 +435,7 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/enrollments" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const moduleId = rawUrl.searchParams.get("module_id");
-      let request = supabase.from("enrollments").select("id,status,progress_percent,best_score,due_date,completed_at,app_users(id,full_name,email),training_modules(id,title,code)", { count: "exact" }).eq("org_id", user.org_id);
+      let request = supabase.from("enrollments").select("id,status,progress_percent,best_score,due_date,completed_at,app_users!enrollments_user_id_fkey(id,full_name,email),training_modules(id,title,code)", { count: "exact" }).eq("org_id", user.org_id);
       if (moduleId) request = request.eq("module_id", moduleId);
       const { data, error, count } = await request.order("due_date", { ascending: true, nullsFirst: false }).range(from, to); if (error) throw error;
       return json({ items: (data || []).map((item: any) => ({ id: item.id, status: item.status, progress_percent: item.progress_percent, best_score: item.best_score, due_date: item.due_date, completed_at: item.completed_at, employee: item.app_users, module: item.training_modules })), page, page_size: pageSize, total: count || 0 });
@@ -466,7 +466,7 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/feedback" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const status = rawUrl.searchParams.get("status") || "open";
-      const { data, error, count } = await supabase.from("knowledge_feedback").select("id,query,reason,status,resolution,created_at,resolved_at,app_users(full_name)", { count: "exact" }).eq("org_id", user.org_id).eq("status", status).order("created_at", { ascending: false }).range(from, to);
+      const { data, error, count } = await supabase.from("knowledge_feedback").select("id,query,reason,status,resolution,created_at,resolved_at,app_users!knowledge_feedback_user_id_fkey(full_name)", { count: "exact" }).eq("org_id", user.org_id).eq("status", status).order("created_at", { ascending: false }).range(from, to);
       if (error) throw error;
       return json({ items: (data || []).map((item: any) => ({ id: item.id, query: item.query, reason: item.reason, status: item.status, resolution: item.resolution, created_at: item.created_at, resolved_at: item.resolved_at, employee: item.app_users?.full_name || "Unknown" })), page, page_size: pageSize, total: count || 0 });
     }
