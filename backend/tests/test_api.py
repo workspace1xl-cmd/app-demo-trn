@@ -29,10 +29,10 @@ def test_complete_employee_journey():
         token = login(client)
         dashboard = client.get("/api/v1/dashboard", headers=auth(token))
         assert dashboard.status_code == 200
-        assert dashboard.json()["training"]["total"] == 22
+        assert dashboard.json()["training"]["total"] == 23
 
         activities = client.get("/api/v1/activities", headers=auth(token)).json()
-        assert len(activities) == 22
+        assert len(activities) == 23
         assert {"responsible_role", "backup_person", "sla", "escalation_level_1", "sop_link"} <= activities[0].keys()
 
         search = client.post("/api/v1/search", headers=auth(token), json={"query": "leave"})
@@ -56,7 +56,7 @@ def test_role_protection_and_admin_analytics():
         admin = login(client, "admin@company.com", "Admin123!")
         response = client.get("/api/v1/admin/analytics", headers=auth(admin))
         assert response.status_code == 200
-        assert response.json()["activities"] == 22
+        assert response.json()["activities"] == 23
 
 
 def test_unresolved_question_can_be_reported():

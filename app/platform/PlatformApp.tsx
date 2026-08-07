@@ -1,12 +1,14 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import styles from "./platform.module.css";
 import AdminConsole from "./AdminConsole";
 import OrgSignup from "./OrgSignup";
 import QuizPlayer from "./QuizPlayer";
+import ResponsibilityGraph, { type GraphActivity } from "./ResponsibilityGraph";
+import AiAssistant from "./AiAssistant";
 
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -25,9 +27,11 @@ type View =
   | "search"
   | "training"
   | "matrix"
+  | "graph"
   | "certificates"
+  | "manager"
   | "admin";
-const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "certificates", "admin"];
+const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "graph", "certificates", "manager", "admin"];
 export type AdminSection =
   | "overview"
   | "employees"
@@ -37,15 +41,25 @@ export type AdminSection =
   | "assignments"
   | "content"
   | "feedback"
-  | "audit";
-const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "matrix", "training", "assignments", "content", "feedback", "audit"];
+  | "audit"
+  | "exec";
+const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "matrix", "training", "assignments", "content", "feedback", "audit", "exec"];
 
 type Activity = {
   id: string; name: string; department: string; responsible_role: string;
   current_person: string; backup_person: string; contact_details: string; sla: string;
   escalation_level_1: string; escalation_level_2: string; sop_link?: string; training_module_link?: string;
 };
-type DashboardData = { user: { name: string }; training: { percent: number; completed: number; total: number }; certificates: number; points: number; open_actions: number };
+// Every component that actually applies is listed — a readiness score
+// should never be a black box, per the design brief. A component the
+// backend didn't consider applicable (e.g. cert currency for someone with
+// no certificates yet) simply doesn't appear here, rather than showing as
+// a misleading 0%.
+type ReadinessComponent = { key: string; label: string; percent: number };
+type Readiness = { score: number; components: ReadinessComponent[] };
+type Milestone = { key: string; label: string; fraction: number; achieved: boolean };
+type Gamification = { streak_days: number; milestones: Milestone[] };
+type DashboardData = { user: { name: string }; training: { percent: number; completed: number; total: number }; certificates: number; points: number; open_actions: number; readiness: Readiness; gamification?: Gamification };
 type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; unresolved?: boolean };
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
 type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
@@ -98,9 +112,12 @@ function renderMarkdownLite(text: string) {
     );
   });
 }
+type Notification = { id: string; kind: string; subject: string; payload: Record<string, unknown>; created_at: string; read_at: string | null };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
-type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; open_feedback: number };
-type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | AdminData | null;
+type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; open_feedback: number; readiness: Readiness };
+type ManagerMember = { id: string; name: string; email: string; training_percent: number; completed: number; total: number; overdue_count: number };
+type ManagerData = { department: { id: string; name: string } | null; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; activities: Activity[] };
+type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | AdminData | ManagerData | null;
 
 export async function request<T = PlatformData>(
   path: string,
@@ -211,6 +228,68 @@ export default function WorkingPlatform() {
     headingRef.current?.focus();
   }, [view, adminSection]);
 
+  // The responsibility graph is fetched once and shared between the
+  // Dashboard hero's mini fragment and the full /platform/graph view,
+  // instead of each re-fetching /api/v1/activities on every switch between
+  // them — same underlying data, same shape MatrixPanel/the RACI table
+  // already use.
+  const [graphActivities, setGraphActivities] = useState<Activity[] | null>(null);
+  useEffect(() => {
+    if (!session) return;
+    request<Activity[]>("/api/v1/activities", session.access_token)
+      .then(setGraphActivities)
+      .catch(() => {});
+  }, [session]);
+  // Bell/notification centre: fetched independently of the view-switching
+  // effect above (it isn't tied to any one screen) and refreshed on an
+  // interval so a reminder that lands while someone's mid-session still
+  // shows up without a manual reload.
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [notifOpen, setNotifOpen] = useState(false);
+  useEffect(() => {
+    if (!session) return;
+    function load() {
+      if (!session) return;
+      request<{ notifications: Notification[]; unread_count: number }>("/api/v1/notifications", session.access_token)
+        .then((res) => {
+          setNotifications(res.notifications);
+          setUnreadCount(res.unread_count);
+        })
+        .catch(() => {});
+    }
+    load();
+    const interval = window.setInterval(load, 60000);
+    return () => window.clearInterval(interval);
+  }, [session]);
+  async function markNotificationRead(id: string) {
+    if (!session) return;
+    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n)));
+    setUnreadCount((c) => Math.max(0, c - 1));
+    request(`/api/v1/notifications/${id}/read`, session.access_token, { method: "POST" }).catch(() => {});
+  }
+  async function markAllNotificationsRead() {
+    if (!session || unreadCount === 0) return;
+    setNotifications((prev) => prev.map((n) => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
+    setUnreadCount(0);
+    request("/api/v1/notifications/read-all", session.access_token, { method: "POST" }).catch(() => {});
+  }
+  const [graphDeptFilter, setGraphDeptFilter] = useState("");
+  const [graphSelection, setGraphSelection] = useState<{ label: string; kind: string; activities: GraphActivity[] } | null>(null);
+  // Declared here (before the early login/signup returns below) because
+  // it's a Hook — rules-of-hooks requires every hook to run on every
+  // render regardless of those conditional returns. Memoized so the array
+  // reference stays stable across renders that don't change the
+  // underlying data or filter: an inline .filter() call in the JSX
+  // created a fresh array every render (including on every hover inside
+  // the graph itself), which restarted the whole d3 force simulation each
+  // time instead of only when the data or filter genuinely changed.
+  const filteredGraphActivities = useMemo(() => {
+    const raw = view === "graph" && Array.isArray(data) ? (data as Activity[]) : null;
+    if (!raw) return null;
+    return graphDeptFilter ? raw.filter((a) => a.department === graphDeptFilter) : raw;
+  }, [view, data, graphDeptFilter]);
+
   useEffect(() => {
     if (!session) return;
     const paths: Record<View, string> = {
@@ -218,7 +297,9 @@ export default function WorkingPlatform() {
       search: `/api/v1/search`,
       training: "/api/v1/training/modules",
       matrix: "/api/v1/activities",
+      graph: "/api/v1/activities",
       certificates: "/api/v1/certificates",
+      manager: "/api/v1/manager/dashboard",
       admin: "/api/v1/admin/analytics",
     };
     if (view === "search") return;
@@ -426,7 +507,11 @@ export default function WorkingPlatform() {
     ["search", "⌕", "Knowledge search"],
     ["training", "◈", "My learning"],
     ["matrix", "◎", "Who does what"],
+    ["graph", "⬡", "Responsibility graph"],
     ["certificates", "◇", "Certificates"],
+    ...(session.user.role === "manager" || session.user.role === "admin"
+      ? [["manager", "◫", "My team"] as [View, string, string]]
+      : []),
     ...(session.user.role === "admin"
       ? [["admin", "⚙", "Admin analytics"] as [View, string, string]]
       : []),
@@ -438,8 +523,11 @@ export default function WorkingPlatform() {
   const searchData = view === "search" ? data as SearchData | null : null;
   const trainingData = view === "training" && Array.isArray(data) ? data as TrainingModule[] : null;
   const matrixData = view === "matrix" && Array.isArray(data) ? data as Activity[] : null;
+  const fullGraphData = view === "graph" && Array.isArray(data) ? data as Activity[] : null;
   const certificateData = view === "certificates" && Array.isArray(data) ? data as Certificate[] : null;
   const adminData = view === "admin" ? data as AdminData | null : null;
+  const managerData =
+    view === "manager" && data && !Array.isArray(data) && "members" in data ? (data as ManagerData) : null;
   return (
     <main className={styles.shell}>
       <aside>
@@ -510,6 +598,45 @@ export default function WorkingPlatform() {
             <small>{(session.user.org_name || "YOUR ORGANISATION").toUpperCase()} · LIVE DATA</small>
             <h1 ref={headingRef} tabIndex={-1}>{nav.find((x) => x[0] === view)?.[2]}</h1>
           </div>
+          <div className={styles.notifWrap}>
+            <button
+              type="button"
+              className={styles.notifBell}
+              onClick={() => setNotifOpen((v) => !v)}
+              aria-expanded={notifOpen}
+              aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+            >
+              🔔
+              {unreadCount > 0 && <span className={styles.notifBadge}>{unreadCount > 9 ? "9+" : unreadCount}</span>}
+            </button>
+            {notifOpen && (
+              <div className={styles.notifPanel} role="menu">
+                <div className={styles.notifPanelHead}>
+                  <b>Notifications</b>
+                  {unreadCount > 0 && (
+                    <button type="button" onClick={markAllNotificationsRead}>
+                      Mark all read
+                    </button>
+                  )}
+                </div>
+                {notifications.length === 0 && <p className={styles.noRecords}>No records found. You&apos;re fully caught up.</p>}
+                <ul>
+                  {notifications.map((n) => (
+                    <li key={n.id} className={n.read_at ? "" : styles.notifUnread}>
+                      <button type="button" onClick={() => markNotificationRead(n.id)}>
+                        <b>{n.subject}</b>
+                        <small>
+                          {n.kind === "learning_reminder" && typeof n.payload.module_title === "string" ? n.payload.module_title : ""}
+                          {n.kind === "certificate_expiry" && typeof n.payload.expires_at === "string" ? `Expires ${formatDate(n.payload.expires_at)}` : ""}
+                        </small>
+                        <small>{formatDate(n.created_at)}</small>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         </header>
         <div className={styles.content}>
           {busy && (
@@ -527,10 +654,25 @@ export default function WorkingPlatform() {
                     channels are connected.
                   </p>
                 </div>
-                <div className={styles.score}>
-                  <b>{dashboardData.training.percent}%</b>
-                  <small>training complete</small>
-                </div>
+                {/* The signature element from the design pass: this hero
+                    used to be a flat gradient card. It's now a live render
+                    of the org's responsibility graph — genuinely computed
+                    from the same RACI data as "Who does what", not a static
+                    image. Honesty note: this shows the org-wide graph, not
+                    a per-viewer-filtered one — every activity's
+                    current_person is still the unassigned seed placeholder
+                    ("Organisation to confirm"), so there's no real named
+                    owner anywhere yet to filter down to. Once ownership
+                    rows carry a real employee_id, this can genuinely narrow
+                    to "your" connections. */}
+                {graphActivities && graphActivities.length > 0 && (
+                  <ResponsibilityGraph
+                    activities={graphActivities}
+                    mode="mini"
+                    onOpenFull={() => goToView("graph")}
+                  />
+                )}
+                <ReadinessRing readiness={dashboardData.readiness} caption="readiness score" />
               </section>
               <div className={styles.stats}>
                 <Stat
@@ -556,6 +698,22 @@ export default function WorkingPlatform() {
                   tone={dashboardData.open_actions > 0 ? "risk" : undefined}
                 />
               </div>
+              {dashboardData.gamification && (
+                <section className={styles.gamification}>
+                  <div className={styles.streakBadge} data-active={dashboardData.gamification.streak_days > 1}>
+                    <b>{dashboardData.gamification.streak_days}</b>
+                    <small>day streak</small>
+                  </div>
+                  <ul className={styles.milestoneList}>
+                    {dashboardData.gamification.milestones.map((m) => (
+                      <li key={m.key} data-achieved={m.achieved}>
+                        <span>{m.achieved ? "✓" : "○"}</span>
+                        {m.label}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
             </>
           )}
           {!busy && view === "search" && (
@@ -717,6 +875,53 @@ export default function WorkingPlatform() {
               {matrixData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
+          {!busy && fullGraphData && (
+            <>
+              <div className={styles.graphToolbar}>
+                <select value={graphDeptFilter} onChange={(e) => setGraphDeptFilter(e.target.value)}>
+                  <option value="">All departments</option>
+                  {Array.from(new Set(fullGraphData.map((a) => a.department))).sort().map((d) => (
+                    <option key={d} value={d}>{d}</option>
+                  ))}
+                </select>
+                <small>
+                  <span className={styles.legendDot} data-tone="risk" /> No named owner
+                  <span className={styles.legendDot} data-tone="readiness" /> Has a named owner
+                  <span className={styles.legendDot} data-tone="ownership" /> Department
+                </small>
+              </div>
+              <ResponsibilityGraph
+                activities={filteredGraphActivities!}
+                mode="full"
+                onNodeSelect={setGraphSelection}
+              />
+              {graphSelection && (
+                <div className={styles.graphSelectionPanel}>
+                  <div>
+                    <b>{graphSelection.label}</b>
+                    <small>{graphSelection.kind === "department" ? "Department" : graphSelection.kind === "role" ? "Responsible role" : "Escalation contact"}</small>
+                  </div>
+                  <ul>
+                    {graphSelection.activities.map((a) => (
+                      <li key={a.id}>
+                        <b>{a.name}</b>
+                        <span>{a.contact_details} · SLA {a.sla}</span>
+                        <em>{a.escalation_level_1} → {a.escalation_level_2}</em>
+                      </li>
+                    ))}
+                  </ul>
+                  {session.user.role === "admin" && (
+                    <button type="button" onClick={() => goToAdminSection("matrix")}>
+                      Manage in Responsibility Matrix →
+                    </button>
+                  )}
+                  <button type="button" className={styles.secondaryBtn} onClick={() => setGraphSelection(null)}>
+                    Close
+                  </button>
+                </div>
+              )}
+            </>
+          )}
           {!busy && certificateData && (
             <div className={styles.certificates}>
               {certificateData.map((c) => (
@@ -752,6 +957,70 @@ export default function WorkingPlatform() {
               )}
             </div>
           )}
+          {!busy && view === "manager" && managerData && (
+            <>
+              <section className={styles.orgReadiness}>
+                <ReadinessRing readiness={managerData.team_readiness} caption="team readiness" />
+                <div>
+                  <b>{managerData.department?.name || "Your team"}</b>
+                  <p>
+                    {managerData.members.length} people ·{" "}
+                    {managerData.overdue_total > 0
+                      ? `${managerData.overdue_total} overdue training item${managerData.overdue_total === 1 ? "" : "s"}`
+                      : "nothing overdue"}
+                    . Reporting line is by department — reassign an employee&apos;s
+                    department in Admin → Employees to move them onto or off a team.
+                  </p>
+                </div>
+              </section>
+              <div className={styles.dataTable}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email ID</th>
+                      <th>Training</th>
+                      <th>Overdue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {managerData.members.map((m) => (
+                      <tr key={m.id}>
+                        <td>{m.name}</td>
+                        <td>{m.email}</td>
+                        <td>
+                          {m.completed}/{m.total} ({m.training_percent}%)
+                        </td>
+                        <td>
+                          {m.overdue_count > 0 ? (
+                            <span className={styles.legendDot} data-tone="risk" />
+                          ) : null}
+                          {m.overdue_count}
+                        </td>
+                      </tr>
+                    ))}
+                    {managerData.members.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className={styles.noRecords}>
+                          No records found. Nobody is assigned to this department yet.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {managerData.activities.length > 0 && (
+                <>
+                  <h3>Your team&apos;s responsibilities</h3>
+                  <ResponsibilityGraph
+                    activities={managerData.activities}
+                    mode="full"
+                    onNodeSelect={setGraphSelection}
+                  />
+                </>
+              )}
+            </>
+          )}
           {view === "admin" && (
             <div className={styles.adminTabs}>
               {(
@@ -765,6 +1034,7 @@ export default function WorkingPlatform() {
                   ["content", "Content Library"],
                   ["feedback", "Feedback Queue"],
                   ["audit", "Audit Log"],
+                  ["exec", "Exec View"],
                 ] as [AdminSection, string][]
               ).map(([id, label]) => (
                 <button
@@ -776,6 +1046,20 @@ export default function WorkingPlatform() {
                 </button>
               ))}
             </div>
+          )}
+          {!busy && adminData && adminSection === "overview" && (
+            <section className={styles.orgReadiness}>
+              <ReadinessRing readiness={adminData.readiness} caption="org readiness" />
+              <div>
+                <b>Organisation readiness</b>
+                <p>
+                  Blends training completion, certificate currency and how many
+                  Responsibility Matrix rows actually have a named owner — not
+                  just an assigned role. Hover or tap the score for the full
+                  breakdown.
+                </p>
+              </div>
+            </section>
           )}
           {!busy && adminData && adminSection === "overview" && (
             <div className={styles.stats}>
@@ -849,6 +1133,7 @@ export default function WorkingPlatform() {
           onCompleted={handleQuizCompleted}
         />
       )}
+      <AiAssistant token={session.access_token} unreadCount={unreadCount} notifications={notifications} />
     </main>
   );
 }
@@ -870,5 +1155,53 @@ function Stat({
       <h3>{value}</h3>
       <p>{note}</p>
     </article>
+  );
+}
+
+// "The one number a CEO or auditor asks for" — surfaced big, with a
+// transparent breakdown on hover/click rather than a black box. Score
+// >=70 reads as readiness-toned, otherwise risk-toned, so the ring color
+// itself carries meaning instead of always defaulting to one color.
+function ReadinessRing({ readiness, caption }: { readiness: Readiness | null | undefined; caption: string }) {
+  const [open, setOpen] = useState(false);
+  // Defensive, not just decorative: a backend that hasn't picked up the
+  // `readiness` field yet (a stale server mid-deploy, an older API
+  // version) shouldn't crash the whole Dashboard — this was caught for
+  // real during verification against a FastAPI instance still running
+  // pre-readiness-score code.
+  if (!readiness) return null;
+  const tone = readiness.score >= 70 ? "readiness" : "risk";
+  return (
+    <div
+      className={styles.readinessWrap}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className={styles.score}
+        data-tone={tone}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={`Readiness score ${readiness.score} out of 100 — ${caption}. Activate for a breakdown.`}
+      >
+        <b>{readiness.score}</b>
+        <small>{caption}</small>
+      </button>
+      {open && (
+        <div className={styles.readinessBreakdown} role="tooltip">
+          <b>What&apos;s behind this score</b>
+          <ul>
+            {readiness.components.map((c) => (
+              <li key={c.key}>
+                <span>{c.label}</span>
+                <b>{c.percent}%</b>
+              </li>
+            ))}
+          </ul>
+          <p>Average of the components above that currently apply.</p>
+        </div>
+      )}
+    </div>
   );
 }

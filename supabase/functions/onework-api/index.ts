@@ -65,6 +65,18 @@ function forbidUnlessAdmin(isAdmin: boolean) {
   return isAdmin ? null : json({ detail: "Administrator permission required." }, 403);
 }
 
+// BUILD PROMPT v4 item 6: captures today's org-wide readiness into
+// readiness_snapshots so the exec view has a trend to draw — reuses
+// whatever readiness was JUST computed by scoreFromComponents() rather
+// than a second formula, and upserts on (org_id, captured_at) so calling
+// this on every admin/analytics load (not just once a day) is harmless.
+async function captureReadinessSnapshot(orgId: string, readiness: { score: number; components: ReadinessComponent[] }) {
+  await supabase.from("readiness_snapshots").upsert(
+    { org_id: orgId, score: readiness.score, components: readiness.components, captured_at: new Date().toISOString().slice(0, 10) },
+    { onConflict: "org_id,captured_at" },
+  );
+}
+
 function paginate(url: URL) {
   const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
   const pageSizeRaw = Number(url.searchParams.get("page_size")) || 20;
@@ -74,6 +86,65 @@ function paginate(url: URL) {
 
 function fieldError(field: string, message: string) {
   return json({ detail: message, field }, 400);
+}
+
+// Readiness score (BUILD PROMPT v4 item 3) — a transparent blend, not a
+// black box: every component that actually applies is listed in the
+// response so the UI can show a real breakdown on hover/click instead of
+// just a bare number. A component that isn't applicable yet (e.g. an
+// employee with zero issued certificates) is left OUT of the average
+// entirely rather than counted as 0% — someone who hasn't reached a
+// certificate-bearing module yet isn't "at risk" on certification, they
+// just don't have that signal yet.
+type ReadinessComponent = { key: string; label: string; percent: number };
+function scoreFromComponents(components: ReadinessComponent[]): { score: number; components: ReadinessComponent[] } {
+  const applicable = components.filter((c) => c.percent !== null && !Number.isNaN(c.percent));
+  const score = applicable.length ? Math.round(applicable.reduce((sum, c) => sum + c.percent, 0) / applicable.length) : 0;
+  return { score, components };
+}
+// BUILD PROMPT v4 item 8 (lowest priority — built last, once every other
+// item was solid). Both signals are derived from data that already exists
+// (module completion count, enrollments.completed_at) rather than a new
+// events/points table: milestones are thresholds against the real
+// curriculum size, and the streak is the longest run of CONSECUTIVE
+// CALENDAR DAYS on which at least one module was actually completed —
+// not "days since last login" or anything that could be gamed by just
+// opening the app. It's a historical fact, so it stays honest even if the
+// most recent completion was a while ago (no "your streak is at risk"
+// framing that would imply activity happening today).
+const MILESTONE_THRESHOLDS: { key: string; label: string; fraction: number }[] = [
+  { key: "getting_started", label: "Getting started", fraction: 0.25 },
+  { key: "halfway", label: "Halfway there", fraction: 0.5 },
+  { key: "almost_there", label: "Almost there", fraction: 0.75 },
+  { key: "graduate", label: "Fully certified", fraction: 1 },
+];
+function longestStreak(completedAtDates: (string | null)[]): number {
+  const days = Array.from(new Set(completedAtDates.filter((d): d is string => Boolean(d)).map((d) => d.slice(0, 10)))).sort();
+  if (!days.length) return 0;
+  let best = 1, current = 1;
+  for (let i = 1; i < days.length; i++) {
+    const prev = new Date(days[i - 1]), cur = new Date(days[i]);
+    const diffDays = Math.round((cur.getTime() - prev.getTime()) / 86400000);
+    current = diffDays === 1 ? current + 1 : 1;
+    best = Math.max(best, current);
+  }
+  return best;
+}
+function buildGamification(completed: number, total: number, enrollment: { completed_at: string | null }[]) {
+  const milestones = MILESTONE_THRESHOLDS.map((m) => ({ ...m, achieved: total > 0 && completed >= Math.ceil(m.fraction * total) }));
+  return { streak_days: longestStreak(enrollment.map((e) => e.completed_at)), milestones };
+}
+function certificateCurrency(certificates: { expires_at: string | null }[]): number | null {
+  if (!certificates.length) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  const current = certificates.filter((c) => !c.expires_at || c.expires_at >= today).length;
+  return Math.round((current / certificates.length) * 100);
+}
+function personalReadiness(trainingPercent: number, certificates: { expires_at: string | null }[]) {
+  const currency = certificateCurrency(certificates);
+  const components: ReadinessComponent[] = [{ key: "training", label: "Training completion", percent: trainingPercent }];
+  if (currency !== null) components.push({ key: "cert_currency", label: "Certificates current (not expired)", percent: currency });
+  return scoreFromComponents(components);
 }
 
 Deno.serve(async (req) => {
@@ -127,9 +198,9 @@ Deno.serve(async (req) => {
     }
 
     if (path === "/api/v1/dashboard") {
-      const [{ data: enrollment }, { count: certificateCount }, { count: moduleCount }] = await Promise.all([
-        supabase.from("enrollments").select("status,best_score").eq("org_id", user.org_id).eq("user_id", user.id),
-        supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("user_id", user.id),
+      const [{ data: enrollment }, { data: certificates }, { count: moduleCount }] = await Promise.all([
+        supabase.from("enrollments").select("status,best_score,completed_at").eq("org_id", user.org_id).eq("user_id", user.id),
+        supabase.from("certificates").select("id,expires_at").eq("org_id", user.org_id).eq("user_id", user.id),
         supabase.from("training_modules").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "published"),
       ]);
       // `total` used to be enrollment.length, which is 0 for anyone with no
@@ -138,7 +209,75 @@ Deno.serve(async (req) => {
       // fetched from training_modules directly, correctly lists all 22.
       // The curriculum size (published modules) is the real denominator.
       const total = moduleCount || 0, completed = enrollment?.filter((item) => item.status === "completed").length || 0;
-      return json({ user: { name: user.full_name, role: user.role }, training: { completed, total, percent: total ? Math.round(completed / total * 100) : 0 }, certificates: certificateCount || 0, points: enrollment?.reduce((sum, item) => sum + (item.best_score || 0) * 5, 0) || 0, open_actions: enrollment?.filter((item) => ["assigned", "in_progress"].includes(item.status)).length || 0 });
+      const trainingPercent = total ? Math.round(completed / total * 100) : 0;
+      const readiness = personalReadiness(trainingPercent, certificates || []);
+      const gamification = buildGamification(completed, total, enrollment || []);
+      return json({ user: { name: user.full_name, role: user.role }, training: { completed, total, percent: trainingPercent }, certificates: certificates?.length || 0, points: enrollment?.reduce((sum, item) => sum + (item.best_score || 0) * 5, 0) || 0, open_actions: enrollment?.filter((item) => ["assigned", "in_progress"].includes(item.status)).length || 0, readiness, gamification });
+    }
+
+    // -------------------------------------------------------------------
+    // Manager dashboard (BUILD PROMPT v4 item 4) — RBAC-scoped to "my
+    // team", reusing department_id as the reporting-line signal since
+    // that's the only one that already exists on app_users; there is no
+    // real org-chart/reports-to model yet. "manager" was already a valid
+    // role value accepted by the employee create/update routes and listed
+    // in the admin Employees role dropdown before this route existed —
+    // nothing previously treated it differently from "employee".
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/manager/dashboard") {
+      if (user.role !== "manager" && !isAdmin) return json({ detail: "Manager permission required." }, 403);
+      if (!user.department_id) return json({ detail: "Your account isn't linked to a department yet. Ask an admin to assign one." }, 409);
+      const [{ data: dept }, { data: teamUsers }, { count: moduleCount }] = await Promise.all([
+        supabase.from("departments").select("id,name").eq("id", user.department_id).eq("org_id", user.org_id).maybeSingle(),
+        supabase.from("app_users").select("id,full_name,email").eq("org_id", user.org_id).eq("department_id", user.department_id).eq("is_active", true).order("full_name"),
+        supabase.from("training_modules").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "published"),
+      ]);
+      const teamIds = (teamUsers || []).map((u) => u.id);
+      const [{ data: enrollments }, { data: activities }] = await Promise.all([
+        teamIds.length ? supabase.from("enrollments").select("user_id,status,due_date").eq("org_id", user.org_id).in("user_id", teamIds) : Promise.resolve({ data: [] as { user_id: string; status: string; due_date: string | null }[] }),
+        dept ? supabase.from("activities").select("id,name,department,responsible_role,current_person,backup_person,contact_details,sla,escalation_level_1,escalation_level_2,sop_link,training_module_link,status").eq("org_id", user.org_id).eq("department", dept.name) : Promise.resolve({ data: [] as unknown[] }),
+      ]);
+      const today = new Date().toISOString().slice(0, 10);
+      const total = moduleCount || 0;
+      const members = (teamUsers || []).map((member) => {
+        const rows = (enrollments || []).filter((e) => e.user_id === member.id);
+        const completed = rows.filter((e) => e.status === "completed").length;
+        const overdue = rows.filter((e) => e.due_date && e.due_date < today && e.status !== "completed").length;
+        const percent = total ? Math.round((completed / total) * 100) : 0;
+        return { id: member.id, name: member.full_name, email: member.email, training_percent: percent, completed, total, overdue_count: overdue };
+      });
+      const teamTotal = members.reduce((sum, m) => sum + m.total, 0), teamCompleted = members.reduce((sum, m) => sum + m.completed, 0);
+      const teamReadiness = scoreFromComponents([{ key: "training", label: "Team training completion", percent: teamTotal ? Math.round((teamCompleted / teamTotal) * 100) : 0 }]);
+      return json({
+        department: dept ? { id: dept.id, name: dept.name } : null,
+        team_readiness: teamReadiness,
+        members,
+        overdue_total: members.reduce((sum, m) => sum + m.overdue_count, 0),
+        activities: activities || [],
+      });
+    }
+
+    // notification_outbox is populated nightly by public.enqueue_onework_reminders()
+    // (pg_cron, added for the n8n email pipeline) — read_at is purely in-app
+    // "seen in the bell dropdown" state, kept separate from status/sent_at
+    // which track actual email delivery.
+    if (path === "/api/v1/notifications" && req.method === "GET") {
+      const { data: rows } = await supabase.from("notification_outbox").select("id,kind,subject,payload,created_at,read_at").eq("org_id", user.org_id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(30);
+      const notifications = rows || [];
+      return json({ notifications, unread_count: notifications.filter((n) => !n.read_at).length });
+    }
+
+    const notifReadMatch = path.match(/^\/api\/v1\/notifications\/([^/]+)\/read$/);
+    if (notifReadMatch && req.method === "POST") {
+      const { data: notif } = await supabase.from("notification_outbox").select("id").eq("id", notifReadMatch[1]).eq("org_id", user.org_id).eq("user_id", user.id).maybeSingle();
+      if (!notif) return json({ detail: "Notification not found." }, 404);
+      await supabase.from("notification_outbox").update({ read_at: new Date().toISOString() }).eq("id", notif.id);
+      return json({ ok: true });
+    }
+
+    if (path === "/api/v1/notifications/read-all" && req.method === "POST") {
+      const { data: rows } = await supabase.from("notification_outbox").update({ read_at: new Date().toISOString() }).eq("org_id", user.org_id).eq("user_id", user.id).is("read_at", null).select("id");
+      return json({ ok: true, marked: (rows || []).length });
     }
 
     if (path === "/api/v1/activities" && req.method === "GET") {
@@ -264,9 +403,62 @@ Deno.serve(async (req) => {
       // Counts every org member (matches the Employees tab's total, which
       // also lists admins), not just role=employee — the two used to
       // disagree because this query filtered by role and that one doesn't.
-      const [employees, enrollment, certificates, attempts, feedback, activities] = await Promise.all([supabase.from("app_users").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("enrollments").select("status").eq("org_id", user.org_id), supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("quiz_attempts").select("score").eq("org_id", user.org_id), supabase.from("knowledge_feedback").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "open"), supabase.from("activities").select("id", { count: "exact", head: true }).eq("org_id", user.org_id)]);
+      const [employees, enrollment, certificates, attempts, feedback, activities] = await Promise.all([supabase.from("app_users").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("enrollments").select("status").eq("org_id", user.org_id), supabase.from("certificates").select("id,expires_at").eq("org_id", user.org_id), supabase.from("quiz_attempts").select("score").eq("org_id", user.org_id), supabase.from("knowledge_feedback").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "open"), supabase.from("activities").select("id,current_person").eq("org_id", user.org_id)]);
       const total = enrollment.data?.length || 0, complete = enrollment.data?.filter((item) => item.status === "completed").length || 0, scores = attempts.data?.map((item) => item.score) || [];
-      return json({ employees: employees.count || 0, training_completion: total ? Math.round(complete / total * 100) : 0, certificates: certificates.count || 0, average_quiz_score: scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length*10)/10 : 0, open_feedback: feedback.count || 0, activities: activities.count || 0 });
+      const trainingPercent = total ? Math.round(complete / total * 100) : 0;
+      // Org-wide readiness adds a third component the employee-facing score
+      // can't have: RACI ownership coverage — what fraction of
+      // responsibility rows actually have a named owner, not just an
+      // assigned role. Same "Organisation to confirm" placeholder check as
+      // the responsibility graph's node coloring, so the two stay
+      // consistent with each other.
+      const raciRows = activities.data || [];
+      const raciCoverage = raciRows.length ? Math.round((raciRows.filter((a) => (a.current_person || "").trim().toLowerCase() !== "organisation to confirm").length / raciRows.length) * 100) : null;
+      const readinessComponents: ReadinessComponent[] = [{ key: "training", label: "Org-wide training completion", percent: trainingPercent }];
+      const certCurrency = certificateCurrency(certificates.data || []);
+      if (certCurrency !== null) readinessComponents.push({ key: "cert_currency", label: "Certificates current (not expired)", percent: certCurrency });
+      if (raciCoverage !== null) readinessComponents.push({ key: "raci_coverage", label: "Responsibilities with a named owner", percent: raciCoverage });
+      const readiness = scoreFromComponents(readinessComponents);
+      await captureReadinessSnapshot(user.org_id, readiness);
+      return json({ employees: employees.count || 0, training_completion: trainingPercent, certificates: certificates.data?.length || 0, average_quiz_score: scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length*10)/10 : 0, open_feedback: feedback.count || 0, activities: activities.data?.length || 0, readiness });
+    }
+
+    // -------------------------------------------------------------------
+    // Administrator: exec/org health view (BUILD PROMPT v4 item 6)
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/admin/exec" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const [{ data: snapshots }, { data: departments }, { data: deptUsers }, { data: deptEnrollments }, { data: activities }] = await Promise.all([
+        supabase.from("readiness_snapshots").select("score,captured_at").eq("org_id", user.org_id).order("captured_at", { ascending: true }).limit(30),
+        supabase.from("departments").select("id,name").eq("org_id", user.org_id).order("name"),
+        supabase.from("app_users").select("id,department_id").eq("org_id", user.org_id),
+        supabase.from("enrollments").select("user_id,status").eq("org_id", user.org_id),
+        supabase.from("activities").select("department,current_person").eq("org_id", user.org_id),
+      ]);
+      const usersByDept = new Map<string, string[]>();
+      for (const u of deptUsers || []) { if (!u.department_id) continue; const list = usersByDept.get(u.department_id) || []; list.push(u.id); usersByDept.set(u.department_id, list); }
+      const enrollmentsByUser = new Map<string, { status: string }[]>();
+      for (const e of deptEnrollments || []) { const list = enrollmentsByUser.get(e.user_id) || []; list.push({ status: e.status }); enrollmentsByUser.set(e.user_id, list); }
+      // Ownership coverage per department name — same placeholder check as
+      // the responsibility graph and org-wide readiness, just grouped by
+      // department instead of computed once for the whole org, so this view
+      // can actually point at WHICH departments have the gap.
+      const activitiesByDept = new Map<string, { current_person: string }[]>();
+      for (const a of activities || []) { const list = activitiesByDept.get(a.department) || []; list.push({ current_person: a.current_person }); activitiesByDept.set(a.department, list); }
+      const departmentComparison = (departments || []).map((dept) => {
+        const userIds = usersByDept.get(dept.id) || [];
+        const rows = userIds.flatMap((id) => enrollmentsByUser.get(id) || []);
+        const total = rows.length, complete = rows.filter((r) => r.status === "completed").length;
+        const deptActivities = activitiesByDept.get(dept.name) || [];
+        const owned = deptActivities.filter((a) => (a.current_person || "").trim().toLowerCase() !== "organisation to confirm").length;
+        return {
+          id: dept.id, name: dept.name, employee_count: userIds.length,
+          readiness_score: total ? Math.round((complete / total) * 100) : null,
+          ownership_coverage: deptActivities.length ? Math.round((owned / deptActivities.length) * 100) : null,
+          activity_count: deptActivities.length,
+        };
+      });
+      return json({ trend: snapshots || [], departments: departmentComparison });
     }
 
     if (path === "/api/v1/admin/audit" && req.method === "GET") {
@@ -282,7 +474,37 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     if (path === "/api/v1/admin/departments" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const { data, error } = await supabase.from("departments").select("id,name,code,created_at").eq("org_id", user.org_id).order("name"); if (error) throw error; return json(data);
+      const [{ data, error }, { data: deptUsers }, { data: deptEnrollments }] = await Promise.all([
+        supabase.from("departments").select("id,name,code,created_at").eq("org_id", user.org_id).order("name"),
+        supabase.from("app_users").select("id,department_id").eq("org_id", user.org_id),
+        supabase.from("enrollments").select("user_id,status").eq("org_id", user.org_id),
+      ]);
+      if (error) throw error;
+      // Department-level readiness (training completion only, for now — see
+      // BUILD PROMPT v4 item 3): computed client-side from users +
+      // enrollments rather than a SQL aggregate, to avoid adding an RPC for
+      // what's still a small dataset. Revisit as a real aggregate query if
+      // org sizes grow enough for this to matter.
+      const usersByDept = new Map<string, string[]>();
+      for (const u of deptUsers || []) {
+        if (!u.department_id) continue;
+        const list = usersByDept.get(u.department_id) || [];
+        list.push(u.id);
+        usersByDept.set(u.department_id, list);
+      }
+      const enrollmentsByUser = new Map<string, { status: string }[]>();
+      for (const e of deptEnrollments || []) {
+        const list = enrollmentsByUser.get(e.user_id) || [];
+        list.push({ status: e.status });
+        enrollmentsByUser.set(e.user_id, list);
+      }
+      const withReadiness = (data || []).map((dept) => {
+        const userIds = usersByDept.get(dept.id) || [];
+        const rows = userIds.flatMap((id) => enrollmentsByUser.get(id) || []);
+        const total = rows.length, complete = rows.filter((r) => r.status === "completed").length;
+        return { ...dept, employee_count: userIds.length, readiness_score: total ? Math.round((complete / total) * 100) : null };
+      });
+      return json(withReadiness);
     }
     if (path === "/api/v1/admin/departments" && req.method === "POST") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
