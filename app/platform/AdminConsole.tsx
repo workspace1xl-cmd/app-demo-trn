@@ -218,6 +218,13 @@ function FieldRenderer({ field, value, error, onChange }: { field: FieldDef; val
           value={value ?? ""}
           placeholder={field.placeholder || (field.type !== "date" ? `Enter ${field.label}` : "DD/MM/YYYY")}
           minLength={field.minLength}
+          // Without this, browsers may silently offer/insert a saved or
+          // generated credential into an admin-facing password field with
+          // no keystroke from the person filling out the form — the field
+          // ends up non-empty (so "required" never fires) with a value
+          // nobody chose. new-password stops that; off suppresses the
+          // browser's unrelated autofill (name/date/etc.) suggestions.
+          autoComplete={field.type === "password" ? "new-password" : "off"}
           onChange={(e) => onChange(field.type === "number" ? e.target.value : e.target.value)}
         />
       )}
@@ -270,7 +277,15 @@ function FormModal({ title, fields, initialValues, submitLabel, onCancel, onSubm
     if (Object.keys(clientErrors).length) { setErrors(clientErrors); return; }
     setBusy(true); setBanner(""); setErrors({});
     try {
-      await onSubmit(values);
+      // Only submit the keys this form actually edits. `values` is seeded
+      // from the full row (initialValues) so every other column — content,
+      // id, org_id, created_at, anything not rendered as a field — rode
+      // along too, coerced through String(). For a non-primitive column
+      // like a SOP's JSON `content`, that silently overwrote it with the
+      // literal text "[object Object]" on every save.
+      const editableKeys = fields.map((f) => f.key);
+      const payload = Object.fromEntries(editableKeys.map((key) => [key, values[key]]));
+      await onSubmit(payload);
     } catch (error) {
       const err = error as Error & { field?: string };
       if (err.field) setErrors({ [err.field]: err.message.endsWith(".") ? err.message : `${err.message}.` });
