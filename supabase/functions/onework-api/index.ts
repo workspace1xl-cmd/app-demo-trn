@@ -93,8 +93,33 @@ Deno.serve(async (req) => {
     }
 
     if (path === "/api/v1/training/modules" && req.method === "GET") {
-      const [{ data: modules, error }, { data: enrollment }] = await Promise.all([supabase.from("training_modules").select("*").eq("org_id", user.org_id).order("sequence"), supabase.from("enrollments").select("module_id,status,progress_percent,best_score,completed_at,due_date").eq("org_id", user.org_id).eq("user_id", user.id)]);
-      if (error) throw error; const progress = new Map(enrollment?.map((item) => [item.module_id, item])); return json(modules?.map((module) => ({ ...module, progress: progress.get(module.id) || null })) || []);
+      const [{ data: modules, error }, { data: enrollment }, { data: resources }] = await Promise.all([
+        supabase.from("training_modules").select("*").eq("org_id", user.org_id).order("sequence"),
+        supabase.from("enrollments").select("module_id,status,progress_percent,best_score,completed_at,due_date").eq("org_id", user.org_id).eq("user_id", user.id),
+        supabase.from("module_resources").select("module_id,resource_type,sequence,content_assets(title,kind,external_url,storage_path,status)").eq("org_id", user.org_id).order("sequence"),
+      ]);
+      if (error) throw error;
+      const progress = new Map(enrollment?.map((item) => [item.module_id, item]));
+      const resourcesByModule = new Map<string, { module_id: string; resource_type: string; title: string; kind: string; url: string | null; storage_path: string | null }[]>();
+      for (const r of resources || []) {
+        const asset: any = Array.isArray((r as any).content_assets) ? (r as any).content_assets[0] : (r as any).content_assets;
+        if (!asset || asset.status !== "ready") continue;
+        const moduleId = (r as any).module_id;
+        const list = resourcesByModule.get(moduleId) || [];
+        list.push({ module_id: moduleId, resource_type: (r as any).resource_type, title: asset.title, kind: asset.kind, url: asset.external_url || null, storage_path: asset.storage_path || null });
+        resourcesByModule.set(moduleId, list);
+      }
+      // Sign download URLs for uploaded files (external links already have a usable URL).
+      const allResources = Array.from(resourcesByModule.values()).flat();
+      await Promise.all(allResources.filter((r) => r.storage_path && !r.url).map(async (r) => {
+        const { data: signed } = await supabase.storage.from(CONTENT_BUCKET).createSignedUrl(r.storage_path!, 3600);
+        r.url = signed?.signedUrl || null;
+      }));
+      return json(modules?.map((module) => ({
+        ...module,
+        progress: progress.get(module.id) || null,
+        resources: (resourcesByModule.get(module.id) || []).map((r) => ({ resource_type: r.resource_type, title: r.title, kind: r.kind, url: r.url })),
+      })) || []);
     }
 
     const quizMatch = path.match(/^\/api\/v1\/training\/modules\/([^/]+)\/quiz$/);
@@ -440,7 +465,7 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/content" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const kind = rawUrl.searchParams.get("kind");
-      let request = supabase.from("content_assets").select("id,kind,title,description,department,file_name,mime_type,size_bytes,version,status,created_at", { count: "exact" }).eq("org_id", user.org_id);
+      let request = supabase.from("content_assets").select("id,kind,title,description,department,file_name,mime_type,size_bytes,version,status,external_url,created_at", { count: "exact" }).eq("org_id", user.org_id);
       if (kind) request = request.eq("kind", kind);
       const { data, error, count } = await request.order("created_at", { ascending: false }).range(from, to); if (error) throw error;
       return json({ items: data || [], page, page_size: pageSize, total: count || 0 });
@@ -459,6 +484,16 @@ Deno.serve(async (req) => {
       if (error) throw error;
       return json({ asset_id: asset.id, upload_url: signed.signedUrl, storage_path: storagePath }, 201);
     }
+    if (path === "/api/v1/admin/content/external" && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      if (!body.title?.trim()) return fieldError("title", "Title is required.");
+      if (!body.external_url?.trim() || !/^https?:\/\//i.test(body.external_url.trim())) return fieldError("external_url", "Enter a valid link starting with http:// or https://.");
+      if (!["document","video","sop","template","image"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
+      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, external_url: body.external_url.trim(), uploaded_by: user.id, status: "ready" }).select().single();
+      if (error) throw error;
+      await audit(user, "content.link", "content_asset", asset.id, { kind: asset.kind, title: asset.title }); return json(asset, 201);
+    }
     const contentCompleteMatch = path.match(/^\/api\/v1\/admin\/content\/([^/]+)\/complete$/);
     if (contentCompleteMatch && req.method === "POST") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
@@ -469,8 +504,9 @@ Deno.serve(async (req) => {
     const contentDownloadMatch = path.match(/^\/api\/v1\/admin\/content\/([^/]+)\/download-url$/);
     if (contentDownloadMatch && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const { data: asset } = await supabase.from("content_assets").select("storage_path").eq("id", contentDownloadMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      const { data: asset } = await supabase.from("content_assets").select("storage_path,external_url").eq("id", contentDownloadMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!asset) return json({ detail: "Asset not found." }, 404);
+      if (asset.external_url) return json({ download_url: asset.external_url });
       const { data: signed, error } = await supabase.storage.from(CONTENT_BUCKET).createSignedUrl(asset.storage_path, 600);
       if (error || !signed) return json({ detail: "Could not prepare the download." }, 502);
       return json({ download_url: signed.signedUrl });
@@ -480,7 +516,7 @@ Deno.serve(async (req) => {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { data: asset } = await supabase.from("content_assets").select("storage_path").eq("id", contentMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!asset) return json({ detail: "Asset not found." }, 404);
-      await supabase.storage.from(CONTENT_BUCKET).remove([asset.storage_path]);
+      if (asset.storage_path) await supabase.storage.from(CONTENT_BUCKET).remove([asset.storage_path]);
       await supabase.from("content_assets").update({ status: "archived" }).eq("id", contentMatch[1]);
       await audit(user, "content.archive", "content_asset", contentMatch[1]); return json({ archived: true });
     }
