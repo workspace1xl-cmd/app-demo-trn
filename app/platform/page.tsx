@@ -39,13 +39,48 @@ type Activity = {
   escalation_level_1: string; escalation_level_2: string; sop_link?: string; training_module_link?: string;
 };
 type DashboardData = { user: { name: string }; training: { percent: number; completed: number; total: number }; certificates: number; points: number; open_actions: number };
-type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[] };
+type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; unresolved?: boolean };
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
 type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
 
 function youtubeEmbedUrl(url: string): string | null {
   const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{6,})/);
   return match ? `https://www.youtube.com/embed/${match[1]}` : null;
+}
+
+// Renders the handful of Markdown constructs Claude's answers actually use
+// (headings, **bold**, blank-line paragraphs) as real elements instead of
+// literal # and ** characters. Deliberately not dangerouslySetInnerHTML —
+// this text comes from an AI response, not from us, so it's built as React
+// children rather than parsed as HTML.
+function renderInlineMarkdown(text: string, keyPrefix: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean);
+  return parts.map((part, index) =>
+    part.startsWith("**") && part.endsWith("**") ? (
+      <strong key={`${keyPrefix}-${index}`}>{part.slice(2, -2)}</strong>
+    ) : (
+      <span key={`${keyPrefix}-${index}`}>{part}</span>
+    ),
+  );
+}
+function renderMarkdownLite(text: string) {
+  return text.split(/\n{2,}/).map((block, blockIndex) => {
+    const heading = block.match(/^(#{1,3})\s+(.*)$/);
+    if (heading) {
+      const Tag = (["h3", "h4", "h5"] as const)[heading[1].length - 1] || "h5";
+      return <Tag key={blockIndex}>{renderInlineMarkdown(heading[2], `b${blockIndex}`)}</Tag>;
+    }
+    return (
+      <p key={blockIndex}>
+        {block.split("\n").map((line, lineIndex, lines) => (
+          <span key={lineIndex}>
+            {renderInlineMarkdown(line, `b${blockIndex}-${lineIndex}`)}
+            {lineIndex < lines.length - 1 && <br />}
+          </span>
+        ))}
+      </p>
+    );
+  });
 }
 type Sop = { id: string; code: string; department: string; title: string; summary: string; version: string; status: string };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
@@ -167,7 +202,10 @@ export default function WorkingPlatform() {
     );
     setTimeout(() => setToast(""), 3500);
     setReloadKey((k) => k + 1);
-    if (result.passed) setView("certificates");
+    if (result.passed) {
+      setData(null);
+      setView("certificates");
+    }
   }
 
   if (!session && showSignup)
@@ -296,7 +334,10 @@ export default function WorkingPlatform() {
       ? [["admin", "⚙", "Admin analytics"] as [View, string, string]]
       : []),
   ];
-  const dashboardData = view === "dashboard" ? data as DashboardData | null : null;
+  const dashboardData =
+    view === "dashboard" && data && !Array.isArray(data) && "user" in data
+      ? (data as DashboardData)
+      : null;
   const searchData = view === "search" ? data as SearchData | null : null;
   const trainingData = view === "training" && Array.isArray(data) ? data as TrainingModule[] : null;
   const matrixData = view === "matrix" && Array.isArray(data) ? data as Activity[] : null;
@@ -318,7 +359,10 @@ export default function WorkingPlatform() {
               className={view === id ? styles.active : ""}
               key={id}
               title={label}
-              onClick={() => setView(id)}
+              onClick={() => {
+                setData(null);
+                setView(id);
+              }}
             >
               <span>{icon}</span>
               {label}
@@ -412,15 +456,18 @@ export default function WorkingPlatform() {
               </form>
               {searchData?.query && (
                 <section className={styles.answer}>
-                  <span>
-                    ✓ VERIFIED ORGANISATIONAL ANSWER ·{" "}
-                    {Math.round(searchData.confidence * 100)}% CONFIDENCE
+                  <span className={searchData.unresolved ? styles.warnBadge : ""}>
+                    {searchData.unresolved
+                      ? "⚠ NO VERIFIED MATCH · ESCALATED FOR REVIEW"
+                      : `✓ VERIFIED ORGANISATIONAL ANSWER · ${Math.round(searchData.confidence * 100)}% CONFIDENCE`}
                   </span>
-                  <h2>{searchData.answer}</h2>
+                  <div className={styles.answerText}>{renderMarkdownLite(searchData.answer)}</div>
                   <p>
-                    {searchData.ai_used
-                      ? "Claude generated this answer only from verified tenant context."
-                      : "Deterministic retrieval is active. Add ANTHROPIC_API_KEY to enable Claude synthesis."}
+                    {searchData.unresolved
+                      ? "This question didn't match verified organisational content. It's been logged for the knowledge team to review."
+                      : searchData.ai_used
+                        ? "Claude generated this answer only from verified tenant context."
+                        : "Deterministic retrieval is active. Add ANTHROPIC_API_KEY to enable Claude synthesis."}
                   </p>
                   {searchData.activities?.map((a) => (
                     <article key={a.id}>

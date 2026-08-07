@@ -168,7 +168,11 @@ Deno.serve(async (req) => {
       const { data: enrollment } = await supabase.from("enrollments").select("id,best_score").eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", module.id).maybeSingle();
       if (enrollment) await supabase.from("enrollments").update({ best_score: Math.max(enrollment.best_score || 0, score), ...(passed ? { status: "completed", progress_percent: 100, completed_at: new Date().toISOString() } : {}) }).eq("id", enrollment.id);
       if (passed) {
-        await supabase.from("certificates").upsert({ org_id: user.org_id, user_id: user.id, module_id: module.id, certificate_number: `OW-${module.code}-${Date.now()}`, issued_at: new Date().toISOString().slice(0,10), expires_at: new Date(Date.now() + module.refresher_months * 30 * 86400000).toISOString().slice(0,10) }, { onConflict: "org_id,user_id,module_id", ignoreDuplicates: true });
+        // A refresher_months=12 certificate must expire in exactly one
+        // calendar year, not 12*30=360 days (5 days short of a year).
+        const expiryDate = new Date();
+        expiryDate.setUTCMonth(expiryDate.getUTCMonth() + module.refresher_months);
+        await supabase.from("certificates").upsert({ org_id: user.org_id, user_id: user.id, module_id: module.id, certificate_number: `OW-${module.code}-${Date.now()}`, issued_at: new Date().toISOString().slice(0,10), expires_at: expiryDate.toISOString().slice(0,10) }, { onConflict: "org_id,user_id,module_id", ignoreDuplicates: true });
         const { data: next } = await supabase.from("training_modules").select("id").eq("org_id", user.org_id).eq("sequence", module.sequence + 1).maybeSingle();
         if (next) await supabase.from("enrollments").update({ status: "assigned" }).eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", next.id).eq("status", "locked");
       }
@@ -205,8 +209,17 @@ Deno.serve(async (req) => {
       ]);
       const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}`), ...(sops || []).map((s) => `SOP: ${s.code} ${s.title}; ${s.summary}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`)].join("\n");
       const answer = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (sops?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0);
-      await audit(user, "knowledge.search", "search", undefined, { query: safe, result_count: count, ai_used: Boolean(answer) });
-      return json({ query: safe, answer: answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: activities?.length ? .93 : count ? .72 : 0, ai_used: Boolean(answer), activities: activities || [], sops: sops || [], modules: modules || [], mistakes: mistakes || [], unresolved: count === 0 });
+      // The prompt explicitly tells Claude to say the question must be
+      // escalated when the context is insufficient. Previously nothing
+      // downstream checked for that phrase, so a refusal was still shown
+      // to the employee labelled "VERIFIED ORGANISATIONAL ANSWER · 72%
+      // CONFIDENCE" whenever a weak, unrelated keyword match kept `count`
+      // above zero. A refusal is a refusal regardless of how many rows a
+      // fuzzy ILIKE happened to touch.
+      const isEscalation = Boolean(answer && /must be escalated|cannot (find|confirm)|no (confirmed|verified) answer|insufficient (information|context)/i.test(answer));
+      const unresolved = count === 0 || isEscalation;
+      await audit(user, "knowledge.search", "search", undefined, { query: safe, result_count: count, ai_used: Boolean(answer), unresolved });
+      return json({ query: safe, answer: answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(answer), activities: activities || [], sops: sops || [], modules: modules || [], mistakes: mistakes || [], unresolved });
     }
 
     if (path === "/api/v1/feedback" && req.method === "POST") {
@@ -218,7 +231,10 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     if (path === "/api/v1/admin/analytics") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const [employees, enrollment, certificates, attempts, feedback, activities, sops] = await Promise.all([supabase.from("app_users").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("role", "employee"), supabase.from("enrollments").select("status").eq("org_id", user.org_id), supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("quiz_attempts").select("score").eq("org_id", user.org_id), supabase.from("knowledge_feedback").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "open"), supabase.from("activities").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("sop_documents").select("id", { count: "exact", head: true }).eq("org_id", user.org_id)]);
+      // Counts every org member (matches the Employees tab's total, which
+      // also lists admins), not just role=employee — the two used to
+      // disagree because this query filtered by role and that one doesn't.
+      const [employees, enrollment, certificates, attempts, feedback, activities, sops] = await Promise.all([supabase.from("app_users").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("enrollments").select("status").eq("org_id", user.org_id), supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("quiz_attempts").select("score").eq("org_id", user.org_id), supabase.from("knowledge_feedback").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "open"), supabase.from("activities").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("sop_documents").select("id", { count: "exact", head: true }).eq("org_id", user.org_id)]);
       const total = enrollment.data?.length || 0, complete = enrollment.data?.filter((item) => item.status === "completed").length || 0, scores = attempts.data?.map((item) => item.score) || [];
       return json({ employees: employees.count || 0, training_completion: total ? Math.round(complete / total * 100) : 0, certificates: certificates.count || 0, average_quiz_score: scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length*10)/10 : 0, open_feedback: feedback.count || 0, activities: activities.count || 0, sops: sops.count || 0 });
     }
