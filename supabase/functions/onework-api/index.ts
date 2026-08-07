@@ -64,7 +64,8 @@ Deno.serve(async (req) => {
       const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
       await supabase.from("sessions").insert({ org_id: user.org_id, user_id: user.id, token_hash: await sha256(token), expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() });
       await audit(user, "auth.login", "user", user.id);
-      return json({ access_token: token, token_type: "bearer", user: { id: user.id, name: user.full_name, email: user.email, role: user.role, org_id: user.org_id } });
+      const { data: org } = await supabase.from("organizations").select("name").eq("id", user.org_id).maybeSingle();
+      return json({ access_token: token, token_type: "bearer", user: { id: user.id, name: user.full_name, email: user.email, role: user.role, org_id: user.org_id, org_name: org?.name || null } });
     }
 
     if (path === "/api/v1/organizations" && req.method === "POST") {
@@ -86,14 +87,17 @@ Deno.serve(async (req) => {
       const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
       await supabase.from("sessions").insert({ org_id: created.org_id, user_id: created.admin_user_id, token_hash: await sha256(token), expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() });
       await audit({ org_id: created.org_id, id: created.admin_user_id }, "organization.provision", "organization", created.org_id, { name: created.org_name });
-      return json({ access_token: token, token_type: "bearer", user: { id: created.admin_user_id, name: created.admin_full_name, email: created.admin_email, role: "admin", org_id: created.org_id } }, 201);
+      return json({ access_token: token, token_type: "bearer", user: { id: created.admin_user_id, name: created.admin_full_name, email: created.admin_email, role: "admin", org_id: created.org_id, org_name: created.org_name } }, 201);
     }
 
     const user = await authenticate(req);
     if (!user) return json({ detail: "Authentication required." }, 401);
     const isAdmin = ["admin", "content_admin"].includes(user.role);
 
-    if (path === "/api/v1/me") return json({ id: user.id, org_id: user.org_id, name: user.full_name, email: user.email, role: user.role, department_id: user.department_id });
+    if (path === "/api/v1/me") {
+      const { data: org } = await supabase.from("organizations").select("name").eq("id", user.org_id).maybeSingle();
+      return json({ id: user.id, org_id: user.org_id, org_name: org?.name || null, name: user.full_name, email: user.email, role: user.role, department_id: user.department_id });
+    }
 
     if (path === "/api/v1/dashboard") {
       const [{ data: enrollment }, { count: certificateCount }] = await Promise.all([

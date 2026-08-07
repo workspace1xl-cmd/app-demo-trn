@@ -11,7 +11,7 @@ export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type Session = {
   access_token: string;
-  user: { name: string; email: string; role: string };
+  user: { name: string; email: string; role: string; org_name?: string | null };
 };
 type View =
   | "dashboard"
@@ -174,20 +174,20 @@ export default function WorkingPlatform() {
     return (
       <main className={styles.loginShell}>
         <section className={styles.loginArt}>
-          <span>ONEWORK · PRODUCTION MODE</span>
+          <span>ONEWORK</span>
           <h1>
-            Your own tenant,
+            Your own workspace,
             <br />
             <em>ready in seconds.</em>
           </h1>
           <p>
-            A starter induction curriculum, tenant-isolated data and an
-            administrator account you can start customising immediately.
+            A ready-made training programme, your own private workspace, and
+            full control from day one — no setup required.
           </p>
           <div className={styles.liveStack}>
-            <b>● Isolated data</b>
-            <b>● 22-module curriculum</b>
-            <b>● Admin console included</b>
+            <b>● Private &amp; secure</b>
+            <b>● 22-module training programme</b>
+            <b>● Full admin control</b>
           </div>
         </section>
         <OrgSignup
@@ -206,21 +206,21 @@ export default function WorkingPlatform() {
     return (
       <main className={styles.loginShell}>
         <section className={styles.loginArt}>
-          <span>ONEWORK · PRODUCTION MODE</span>
+          <span>ONEWORK</span>
           <h1>
             Every employee knows
             <br />
             <em>what to do next.</em>
           </h1>
           <p>
-            Real authentication, tenant-scoped data, tracked learning, verified
-            knowledge and auditable ownership.
+            Ask any question and get a verified answer, complete your
+            training, and always know exactly who owns what — all in one
+            place.
           </p>
           <div className={styles.liveStack}>
-            <b>● API</b>
-            <b>● PostgreSQL</b>
-            <b>● Claude-ready search</b>
-            <b>● n8n automation</b>
+            <b>● Verified answers</b>
+            <b>● Guided training</b>
+            <b>● Real certificates</b>
           </div>
         </section>
         <form className={styles.loginCard} onSubmit={login}>
@@ -250,9 +250,6 @@ export default function WorkingPlatform() {
           {error && (
             <div className={styles.error}>
               {error}
-              <small>
-                Start the API with <code>make up</code>, then try again.
-              </small>
             </div>
           )}
           <button disabled={busy}>
@@ -278,7 +275,6 @@ export default function WorkingPlatform() {
               Admin account
             </button>
           </div>
-          <small>API: {API}</small>
           <small>
             New organisation?{" "}
             <a href="#" onClick={(e) => { e.preventDefault(); setShowSignup(true); }}>
@@ -354,7 +350,7 @@ export default function WorkingPlatform() {
       <section className={styles.work}>
         <header>
           <div>
-            <small>EXAMPLE ORGANISATION · LIVE DATA</small>
+            <small>{(session.user.org_name || "YOUR ORGANISATION").toUpperCase()} · LIVE DATA</small>
             <h1>{nav.find((x) => x[0] === view)?.[2]}</h1>
           </div>
           <Link href="/">Open management blueprint ↗</Link>
