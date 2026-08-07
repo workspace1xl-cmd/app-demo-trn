@@ -66,6 +66,29 @@ Deno.serve(async (req) => {
       await audit(user, "auth.login", "user", user.id);
       return json({ access_token: token, token_type: "bearer", user: { id: user.id, name: user.full_name, email: user.email, role: user.role, org_id: user.org_id } });
     }
+
+    if (path === "/api/v1/organizations" && req.method === "POST") {
+      const body = await req.json();
+      for (const field of ["organization_name", "organization_slug", "full_name", "email", "password"]) {
+        if (!body[field]?.toString().trim()) return fieldError(field, `${field.replace(/_/g, " ")} is required.`);
+      }
+      if (body.password.length < 8) return fieldError("password", "Password must be at least 8 characters.");
+      const { data, error } = await supabase.rpc("provision_organization", {
+        p_org_name: body.organization_name, p_org_slug: body.organization_slug,
+        p_admin_full_name: body.full_name, p_admin_email: body.email, p_admin_password: body.password,
+      });
+      const created = data?.[0];
+      if (error || !created) {
+        const message = error?.message || "";
+        const field = message.includes("Organisation URL") ? "organization_slug" : message.includes("already exists") ? "organization_name" : message.includes("Password") ? "password" : message.includes("Email") ? "email" : undefined;
+        return json({ detail: message || "Could not create the organisation.", field }, message ? 400 : 500);
+      }
+      const token = `${crypto.randomUUID()}${crypto.randomUUID()}`.replaceAll("-", "");
+      await supabase.from("sessions").insert({ org_id: created.org_id, user_id: created.admin_user_id, token_hash: await sha256(token), expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() });
+      await audit({ org_id: created.org_id, id: created.admin_user_id }, "organization.provision", "organization", created.org_id, { name: created.org_name });
+      return json({ access_token: token, token_type: "bearer", user: { id: created.admin_user_id, name: created.admin_full_name, email: created.admin_email, role: "admin", org_id: created.org_id } }, 201);
+    }
+
     const user = await authenticate(req);
     if (!user) return json({ detail: "Authentication required." }, 401);
     const isAdmin = ["admin", "content_admin"].includes(user.role);

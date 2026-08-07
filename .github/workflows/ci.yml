@@ -31,3 +31,4 @@ jobs:
       - run: backend/.venv/bin/pip install -r backend/requirements.txt
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_api.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_admin.py -q
+      - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_signup.py -q

@@ -56,7 +56,7 @@ npm run build
 make test-api
 ```
 
-`make test-api` runs `test_api.py` and `test_admin.py` as two separate `pytest` processes. They must not run in the same process: `app/db.py` creates its SQLAlchemy engine once, from whichever `DATABASE_URL` is set at first import of `app.main`, so a single combined `pytest -q` run silently makes both files share one SQLite file and their row-count assertions collide.
+`make test-api` runs `test_api.py`, `test_admin.py` and `test_signup.py` as three separate `pytest` processes. They must not run in the same process: `app/db.py` creates its SQLAlchemy engine once, from whichever `DATABASE_URL` is set at first import of `app.main`, so a single combined `pytest -q` run silently makes all three files share one SQLite file and their row-count assertions collide.
 
 Recommended production smoke path:
 

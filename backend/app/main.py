@@ -1,3 +1,4 @@
+import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
@@ -11,9 +12,9 @@ from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
 from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Organization, QuizAttempt, QuizQuestion, SOPDocument, TrainingModule, User
-from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, QuestionCreate, QuestionUpdate, QuizSubmission, SOPCreate, SOPUpdate, SearchRequest, TokenResponse
+from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SOPCreate, SOPUpdate, SearchRequest, TokenResponse
 from .security import create_token, hash_password, verify_password
-from .seed import seed_database
+from .seed import MODULES, seed_database
 
 
 settings = get_settings()
@@ -54,6 +55,9 @@ def require_status(value: str | None, allowed: set[str], field: str) -> None:
         raise HTTPException(400, {"detail": f"Select a valid {field}.", "field": field})
 
 
+SLUG_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -82,6 +86,36 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     audit(db, user, "auth.login", "user", user.id); db.commit()
     return TokenResponse(access_token=create_token(user.id, user.org_id, user.role), user={"id": user.id, "name": user.full_name, "email": user.email, "role": user.role, "org_id": user.org_id})
+
+
+@app.post("/api/v1/organizations", response_model=TokenResponse, status_code=201)
+def create_organization(payload: OrganizationSignup, db: Session = Depends(get_db)):
+    name = payload.organization_name.strip()
+    slug = payload.organization_slug.strip().lower()
+    if not SLUG_RE.match(slug):
+        raise HTTPException(400, {"detail": "Organisation URL may only contain lowercase letters, numbers and hyphens.", "field": "organization_slug"})
+    if db.scalar(select(Organization).where(or_(Organization.slug == slug, Organization.name == name))):
+        raise HTTPException(400, {"detail": "An organisation with this name or URL already exists.", "field": "organization_name"})
+    if db.scalar(select(User).where(func.lower(User.email) == payload.email.lower())):
+        raise HTTPException(400, {"detail": "An account with this Email ID already exists.", "field": "email"})
+
+    org = Organization(name=name, slug=slug, settings={"passing_score": 80, "onboarded_via": "self_signup"})
+    db.add(org); db.flush()
+    department = Department(org_id=org.id, name="Human Resources", code="HR")
+    db.add(department)
+    for dept_name, dept_code in [("Information Technology", "IT"), ("Finance", "FIN"), ("Operations", "OPS"), ("Administration", "ADM")]:
+        db.add(Department(org_id=org.id, name=dept_name, code=dept_code))
+    db.flush()
+    admin = User(org_id=org.id, department_id=department.id, email=payload.email.lower(), full_name=payload.full_name.strip(), role="admin", password_hash=hash_password(payload.password))
+    db.add(admin); db.flush()
+
+    for index, (code, title, objective, duration) in enumerate(MODULES, 1):
+        module = TrainingModule(org_id=org.id, code=code, title=title, objective=objective, duration_minutes=duration, sequence=index, content_type="mixed", status="published")
+        db.add(module); db.flush()
+        db.add(QuizQuestion(org_id=org.id, module_id=module.id, prompt=f"Which action best demonstrates: {title}?", options=["Use the approved process and documented owner", "Ask informally and skip the record", "Use a personal channel", "Wait without escalating"], correct_index=0, explanation="Use the approved process, official channel and documented owner."))
+
+    audit(db, admin, "organization.provision", "organization", org.id, {"name": org.name}); db.commit()
+    return TokenResponse(access_token=create_token(admin.id, org.id, admin.role), user={"id": admin.id, "name": admin.full_name, "email": admin.email, "role": admin.role, "org_id": org.id})
 
 
 @app.get("/api/v1/me")
