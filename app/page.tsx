@@ -242,6 +242,9 @@ export default function Home() {
             <h1>{title}</h1>
           </div>
           <div className="top-actions">
+            <a className="primary small" href="/platform">
+              Open working platform
+            </a>
             <label className="role-switch">
               <span>VIEWING AS</span>
               <select

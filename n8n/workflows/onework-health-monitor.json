@@ -1,0 +1,27 @@
+{
+  "name": "OneWork - API Health Monitor",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] } },
+      "id": "schedule-health",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": { "url": "={{ $env.ONEWORK_API_URL }}/health", "options": { "timeout": 10000 } },
+      "id": "check-api",
+      "name": "Check OneWork API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 300]
+    }
+  ],
+  "connections": { "Every 15 minutes": { "main": [[{ "node": "Check OneWork API", "type": "main", "index": 0 }]] } },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "6220a4c2-d4b8-4824-bf9b-1d101d60503a",
+  "meta": { "templateCredsSetupCompleted": true },
+  "tags": []
+}

@@ -2,6 +2,11 @@
 
 # dependencies
 /node_modules
+/.venv/
+/backend/.venv/
+/backend/*.db
+**/__pycache__/
+**/.pytest_cache/
 /.pnp
 .pnp.*
 .yarn/*

@@ -1,0 +1,34 @@
+create policy "deny direct access" on public.organizations for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.departments for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.app_users for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.sessions for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.activities for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.sop_documents for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.training_modules for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.quiz_questions for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.enrollments for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.quiz_attempts for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.certificates for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.knowledge_feedback for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.audit_events for all to anon, authenticated using (false) with check (false);
+create policy "deny direct access" on public.knowledge_chunks for all to anon, authenticated using (false) with check (false);
+
+create index app_users_department_idx on public.app_users(department_id);
+create index audit_events_actor_idx on public.audit_events(actor_user_id);
+create index certificates_user_idx on public.certificates(user_id);
+create index certificates_module_idx on public.certificates(module_id);
+create index enrollments_user_idx on public.enrollments(user_id);
+create index enrollments_module_idx on public.enrollments(module_id);
+create index feedback_org_idx on public.knowledge_feedback(org_id);
+create index feedback_user_idx on public.knowledge_feedback(user_id);
+create index quiz_attempts_org_idx on public.quiz_attempts(org_id);
+create index quiz_attempts_user_idx on public.quiz_attempts(user_id);
+create index quiz_attempts_module_idx on public.quiz_attempts(module_id);
+create index quiz_questions_org_idx on public.quiz_questions(org_id);
+create index quiz_questions_module_idx on public.quiz_questions(module_id);
+create index sessions_org_idx on public.sessions(org_id);
+create index sessions_user_idx on public.sessions(user_id);
+create index knowledge_chunks_fts_idx on public.knowledge_chunks using gin(to_tsvector('english',title||' '||content));
+
+alter extension vector set schema extensions;
+alter extension pg_trgm set schema extensions;
