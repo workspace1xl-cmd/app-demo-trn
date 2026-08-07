@@ -505,6 +505,7 @@ export default function WorkingPlatform() {
                   </div>
                 </article>
               ))}
+              {trainingData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
           {!busy && matrixData && (
@@ -542,6 +543,7 @@ export default function WorkingPlatform() {
                   </span>
                 </article>
               ))}
+              {matrixData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
           {!busy && sopData && (
@@ -558,6 +560,7 @@ export default function WorkingPlatform() {
                   </div>
                 </article>
               ))}
+              {sopData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
           {!busy && certificateData && (
@@ -588,6 +591,11 @@ export default function WorkingPlatform() {
                   </div>
                 </article>
               ))}
+              {certificateData.length === 0 && (
+                <div className={styles.noRecords}>
+                  No records found. Certificates are issued automatically when you pass a module assessment.
+                </div>
+              )}
             </div>
           )}
           {view === "admin" && (
