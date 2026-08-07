@@ -173,6 +173,38 @@ class MistakeRegisterEntry(Base, TimestampMixin):
     is_seed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class Notification(Base):
+    # Mirrors Supabase's notification_outbox (which the n8n email pipeline
+    # also reads via status/sent_at) — read_at is purely in-app "seen in the
+    # bell dropdown" state and must never be confused with email delivery.
+    __tablename__ = "notification_outbox"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(40))
+    subject: Mapped[str] = mapped_column(String(200))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ReadinessSnapshot(Base):
+    # Mirrors Supabase's readiness_snapshots — one row per org per day,
+    # captured lazily off the exact same formula /api/v1/admin/analytics
+    # uses (see main.py's captureReadinessSnapshot equivalent), never a
+    # second independent calculation.
+    __tablename__ = "readiness_snapshots"
+    __table_args__ = (UniqueConstraint("org_id", "captured_at"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    score: Mapped[int] = mapped_column(Integer)
+    components: Mapped[list] = mapped_column(JSON, default=list)
+    captured_at: Mapped[date] = mapped_column(Date, default=date.today)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

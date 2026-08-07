@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -83,13 +83,14 @@ def seed_database(db: Session) -> None:
         dep = Department(org_id=org.id, name=name, code=code); db.add(dep); db.flush(); departments[name] = dep
     employee = User(org_id=org.id, department_id=departments["Operations"].id, email="employee@company.com", full_name="Asha Sharma", role="employee", password_hash=hash_password("Demo123!"))
     admin = User(org_id=org.id, department_id=departments["Human Resources"].id, email="admin@company.com", full_name="Company Admin", role="admin", password_hash=hash_password("Admin123!"))
-    db.add_all([employee, admin]); db.flush()
+    manager = User(org_id=org.id, department_id=departments["Operations"].id, email="manager@company.com", full_name="Rohan Verma", role="manager", password_hash=hash_password("Manager123!"))
+    db.add_all([employee, admin, manager]); db.flush()
     modules = []
     for index, (code, title, objective, duration) in enumerate(MODULES, 1):
         module = TrainingModule(org_id=org.id, code=code, title=title, objective=objective, duration_minutes=duration, sequence=index, content_type="mixed", content={"sections": [objective], "prototype": False})
         db.add(module); db.flush(); modules.append(module)
         db.add(QuizQuestion(org_id=org.id, module_id=module.id, prompt=f"Which action best demonstrates: {title}?", options=["Use the approved process and documented owner", "Ask informally and skip the record", "Use a personal channel", "Wait without escalating"], correct_index=0, explanation="Use the approved process, official channel and documented owner."))
-        db.add(Enrollment(org_id=org.id, user_id=employee.id, module_id=module.id, status="completed" if index <= 2 else "in_progress" if index == 3 else "locked", progress_percent=100 if index <= 2 else 42 if index == 3 else 0, best_score=90 if index == 1 else 85 if index == 2 else None))
+        db.add(Enrollment(org_id=org.id, user_id=employee.id, module_id=module.id, status="completed" if index <= 2 else "in_progress" if index == 3 else "locked", progress_percent=100 if index <= 2 else 42 if index == 3 else 0, best_score=90 if index == 1 else 85 if index == 2 else None, completed_at=datetime.utcnow() if index <= 2 else None))
     db.add(Certificate(org_id=org.id, user_id=employee.id, module_id=modules[0].id, certificate_number="OW-WPB-2026-0001", issued_at=date.today() - timedelta(days=20), expires_at=date.today() + timedelta(days=345)))
     for name, department, role, contact, sla, l1, l2, sop, module in ACTIVITIES:
         db.add(Activity(org_id=org.id, name=name, department=department, responsible_role=role, current_person="Organisation to confirm", backup_person=f"{department} backup", contact_details=contact, sla=sla, escalation_level_1=l1, escalation_level_2=l2, related_documents=[f"{sop} form or checklist"], sop_link=sop, training_module_link=module, process_steps=["Open the official request channel", "Provide the required information and evidence", "Track the published SLA", f"Escalate to {l1} if unresolved"]))

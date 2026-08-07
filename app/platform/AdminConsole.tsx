@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import styles from "./platform.module.css";
 import { API, request } from "./PlatformApp";
 import type { AdminSection } from "./PlatformApp";
+import ResponsibilityGraph, { type GraphActivity } from "./ResponsibilityGraph";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -410,7 +411,7 @@ function Toolbar({ q, onSearch, placeholder, createLabel, onCreate }: { q: strin
 // Departments
 // ---------------------------------------------------------------------------
 
-type Department = { id: string; name: string; code: string };
+type Department = { id: string; name: string; code: string; employee_count?: number; readiness_score?: number | null };
 
 function DepartmentsPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
@@ -428,7 +429,23 @@ function DepartmentsPanel({ token }: { token: string }) {
       <Toolbar q={list.q} onSearch={list.setQ} placeholder="Search departments" createLabel="+ Add Department" onCreate={() => setModal({ mode: "create" })} />
       <Feedback error={list.error} toast={toast} />
       <DataTable
-        columns={[{ key: "name", label: "Department Name" }, { key: "code", label: "Department Code" }]}
+        columns={[
+          { key: "name", label: "Department Name" },
+          { key: "code", label: "Department Code" },
+          { key: "employee_count", label: "Employees", render: (row) => row.employee_count ?? "—" },
+          {
+            key: "readiness_score",
+            label: "Readiness",
+            render: (row) =>
+              row.readiness_score == null ? (
+                <span style={{ color: "#8b8f9e" }}>No training data yet</span>
+              ) : (
+                <span style={{ fontWeight: 800, color: row.readiness_score >= 70 ? "var(--readiness)" : "var(--risk)" }}>
+                  {row.readiness_score}%
+                </span>
+              ),
+          },
+        ]}
         rows={list.items}
         rowId={(row) => row.id}
         loading={list.loading}
@@ -1448,6 +1465,100 @@ function AuditPanel({ token }: { token: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Exec / org health view (BUILD PROMPT v4 item 6)
+// ---------------------------------------------------------------------------
+
+type ExecTrendPoint = { score: number; captured_at: string };
+type ExecDepartment = { id: string; name: string; employee_count: number; readiness_score: number | null; ownership_coverage: number | null; activity_count: number };
+type ExecData = { trend: ExecTrendPoint[]; departments: ExecDepartment[] };
+
+// A small hand-built SVG bar chart rather than a charting library — this is
+// a handful of points on a 0-100 axis, not worth a dependency, and it stays
+// inside the same token system (readiness/risk colours) as everything else.
+function TrendChart({ trend }: { trend: ExecTrendPoint[] }) {
+  if (trend.length === 0) return <p className={styles.noRecords}>No records found. Readiness snapshots start accumulating once Admin Overview has been viewed on at least two different days.</p>;
+  const width = 640, height = 160, pad = 24;
+  const barWidth = (width - pad * 2) / trend.length;
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: "100%", height: "auto" }} role="img" aria-label="Org readiness trend over time">
+      <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="#e8e9f0" />
+      {trend.map((point, index) => {
+        const barHeight = ((height - pad * 2) * point.score) / 100;
+        const x = pad + index * barWidth;
+        const y = height - pad - barHeight;
+        return (
+          <g key={point.captured_at}>
+            <rect x={x + 2} y={y} width={Math.max(2, barWidth - 4)} height={barHeight} rx={3} fill={point.score >= 70 ? "var(--readiness)" : "var(--risk)"} />
+            <title>{`${formatDate(point.captured_at)}: ${point.score}%`}</title>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function ExecPanel({ token }: { token: string }) {
+  const [data, setData] = useState<ExecData | null>(null);
+  const [error, setError] = useState("");
+  const activities = useLookup<GraphActivity>(token, "/api/v1/activities");
+  useEffect(() => {
+    request<ExecData>("/api/v1/admin/exec", token).then(setData).catch((e) => setError(e instanceof Error ? e.message : "Request failed"));
+  }, [token]);
+  const gapDepartments = (data?.departments || []).filter((d) => d.ownership_coverage !== null && d.ownership_coverage < 50);
+  return (
+    <section>
+      <Feedback error={error} />
+      <div className={styles.orgReadiness} style={{ display: "block" }}>
+        <b>Org readiness trend</b>
+        <p>Captured once a day from the same score shown on Admin Overview — the two can never disagree, because this is that score&apos;s history, not a separate calculation.</p>
+        <TrendChart trend={data?.trend || []} />
+      </div>
+      {gapDepartments.length > 0 && (
+        <div className={styles.error} style={{ marginTop: 16 }}>
+          <b>{gapDepartments.length} department{gapDepartments.length === 1 ? "" : "s"} with an ownership gap:</b>{" "}
+          {gapDepartments.map((d) => d.name).join(", ")} — under half of their Responsibility Matrix rows have a named owner.
+        </div>
+      )}
+      <DataTable
+        columns={[
+          { key: "name", label: "Department" },
+          { key: "employee_count", label: "Employees" },
+          {
+            key: "readiness_score",
+            label: "Readiness",
+            render: (row) =>
+              row.readiness_score == null ? (
+                <span style={{ color: "#8b8f9e" }}>No training data yet</span>
+              ) : (
+                <span style={{ fontWeight: 800, color: row.readiness_score >= 70 ? "var(--readiness)" : "var(--risk)" }}>{row.readiness_score}%</span>
+              ),
+          },
+          {
+            key: "ownership_coverage",
+            label: "Named ownership",
+            render: (row) =>
+              row.ownership_coverage == null ? (
+                <span style={{ color: "#8b8f9e" }}>No responsibilities logged</span>
+              ) : (
+                <span style={{ fontWeight: 800, color: row.ownership_coverage >= 50 ? "var(--readiness)" : "var(--risk)" }}>{row.ownership_coverage}% of {row.activity_count}</span>
+              ),
+          },
+        ]}
+        rows={data?.departments || []}
+        rowId={(row) => row.id}
+        loading={!data}
+      />
+      <h3 style={{ marginTop: 28 }}>Org-wide responsibility graph</h3>
+      {activities.length > 0 ? (
+        <ResponsibilityGraph activities={activities} mode="full" />
+      ) : (
+        <p className={styles.noRecords}>No records found.</p>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1461,6 +1572,7 @@ export default function AdminConsole({ token, section }: { token: string; sectio
     case "content": return <ContentSection token={token} />;
     case "feedback": return <FeedbackPanel token={token} />;
     case "audit": return <AuditPanel token={token} />;
+    case "exec": return <ExecPanel token={token} />;
     default: return null;
   }
 }

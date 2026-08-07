@@ -1,3 +1,4 @@
+import math
 import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
-from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Organization, QuizAttempt, QuizQuestion, TrainingModule, User
+from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, Organization, QuizAttempt, QuizQuestion, ReadinessSnapshot, TrainingModule, User
 from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SearchRequest, TokenResponse
 from .security import create_token, hash_password, verify_password
 from .seed import MODULES, seed_database
@@ -22,6 +23,41 @@ settings = get_settings()
 
 def audit(db: Session, user: User, action: str, entity_type: str, entity_id: str | None = None, details: dict | None = None) -> None:
     db.add(AuditEvent(org_id=user.org_id, actor_user_id=user.id, action=action, entity_type=entity_type, entity_id=entity_id, details=details or {}))
+
+
+# Mirrors Supabase's public.enqueue_onework_reminders(), which runs nightly
+# there via pg_cron. There's no scheduler in this local reference backend,
+# so it's run lazily and idempotently (same "not already enqueued today"
+# guard) the moment a signed-in user asks for their notifications, instead
+# of introducing a whole separate job runner just for the demo mirror.
+def _enqueue_reminders(db: Session, org_id: str) -> None:
+    today = date.today()
+    todays_notifs = db.scalars(select(Notification).where(Notification.org_id == org_id, func.date(Notification.created_at) == today)).all()
+    already_reminded = {(n.user_id, n.kind, n.payload.get("module_id") or n.payload.get("certificate_id")) for n in todays_notifs}
+
+    stale_cutoff = datetime.utcnow() - timedelta(days=7)
+    stale = db.scalars(
+        select(Enrollment).where(Enrollment.org_id == org_id, Enrollment.status.in_(["assigned", "in_progress"]), Enrollment.updated_at < stale_cutoff)
+    ).all()
+    for enrollment in stale:
+        if (enrollment.user_id, "learning_reminder", enrollment.module_id) in already_reminded:
+            continue
+        module = db.get(TrainingModule, enrollment.module_id)
+        if not module:
+            continue
+        db.add(Notification(org_id=org_id, user_id=enrollment.user_id, kind="learning_reminder", subject="Continue your required OneWork training",
+                             payload={"module_id": module.id, "module_code": module.code, "module_title": module.title, "status": enrollment.status}))
+
+    expiring = db.scalars(
+        select(Certificate).where(Certificate.org_id == org_id, Certificate.expires_at.isnot(None), Certificate.expires_at >= today, Certificate.expires_at <= today + timedelta(days=60))
+    ).all()
+    for cert in expiring:
+        if (cert.user_id, "certificate_expiry", cert.id) in already_reminded:
+            continue
+        module = db.get(TrainingModule, cert.module_id)
+        db.add(Notification(org_id=org_id, user_id=cert.user_id, kind="certificate_expiry", subject="Your OneWork certificate is approaching expiry",
+                             payload={"certificate_id": cert.id, "certificate_number": cert.certificate_number, "expires_at": cert.expires_at.isoformat(), "module_title": module.title if module else None}))
+    db.flush()
 
 
 def activity_dict(item: Activity) -> dict:
@@ -120,13 +156,157 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
     return {"id": user.id, "org_id": user.org_id, "org_name": org.name if org else None, "name": user.full_name, "email": user.email, "role": user.role, "department_id": user.department_id}
 
 
+def _round_half_up(value: float) -> int:
+    # Python's builtin round() rounds .5 to the nearest EVEN integer
+    # (round(54.5) == 54, round(55.5) == 56) — "banker's rounding". The
+    # Supabase Edge Function this backend mirrors is TypeScript/Deno, where
+    # Math.round always rounds .5 up (Math.round(54.5) === 55). Same
+    # formula, same input, different output between the two backends for
+    # any score that happens to land exactly on a half-point — caught by
+    # hovering the readiness ring in the browser and seeing 54 where the
+    # component math (9% + 100%) / 2 = 54.5 should read 55.
+    return math.floor(value + 0.5)
+
+
+def _certificate_currency(certificates: list[Certificate]) -> float | None:
+    if not certificates:
+        return None
+    today = date.today()
+    current = sum(1 for c in certificates if not c.expires_at or c.expires_at >= today)
+    return _round_half_up(current / len(certificates) * 100)
+
+
+def _score_from_components(components: list[dict]) -> dict:
+    applicable = [c for c in components if c["percent"] is not None]
+    score = _round_half_up(sum(c["percent"] for c in applicable) / len(applicable)) if applicable else 0
+    return {"score": score, "components": components}
+
+
+# BUILD PROMPT v4 item 6 — mirrors the Edge Function's captureReadinessSnapshot:
+# upserts today's org-wide readiness (already computed by _score_from_components,
+# never recalculated here) so /api/v1/admin/exec has a trend to draw. Idempotent
+# per (org_id, captured_at); caller still owns the commit.
+def _capture_readiness_snapshot(db: Session, org_id: str, readiness: dict) -> None:
+    today = date.today()
+    existing = db.scalar(select(ReadinessSnapshot).where(ReadinessSnapshot.org_id == org_id, ReadinessSnapshot.captured_at == today))
+    if existing:
+        existing.score = readiness["score"]
+        existing.components = readiness["components"]
+    else:
+        db.add(ReadinessSnapshot(org_id=org_id, score=readiness["score"], components=readiness["components"], captured_at=today))
+
+
+# BUILD PROMPT v4 item 8 — mirrors the Edge Function's buildGamification():
+# milestones are thresholds against the real curriculum size, and the
+# streak is the longest run of consecutive CALENDAR DAYS with at least one
+# real completed_at, not "days since login" — a historical fact, not
+# something that implies activity happening today.
+_MILESTONE_THRESHOLDS = [
+    {"key": "getting_started", "label": "Getting started", "fraction": 0.25},
+    {"key": "halfway", "label": "Halfway there", "fraction": 0.5},
+    {"key": "almost_there", "label": "Almost there", "fraction": 0.75},
+    {"key": "graduate", "label": "Fully certified", "fraction": 1},
+]
+
+
+def _longest_streak(completed_ats: list[datetime | None]) -> int:
+    days = sorted({d.date() for d in completed_ats if d})
+    if not days:
+        return 0
+    best = current = 1
+    for i in range(1, len(days)):
+        current = current + 1 if (days[i] - days[i - 1]).days == 1 else 1
+        best = max(best, current)
+    return best
+
+
+def _build_gamification(completed: int, total: int, enrollments: list[Enrollment]) -> dict:
+    milestones = [{**m, "achieved": total > 0 and completed >= math.ceil(m["fraction"] * total)} for m in _MILESTONE_THRESHOLDS]
+    return {"streak_days": _longest_streak([e.completed_at for e in enrollments]), "milestones": milestones}
+
+
 @app.get("/api/v1/dashboard")
 def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
     enrollments = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id)).all()
     certificates = db.scalars(select(Certificate).where(Certificate.org_id == user.org_id, Certificate.user_id == user.id)).all()
     complete = sum(item.status == "completed" for item in enrollments)
     total = len(enrollments)
-    return {"user": {"name": user.full_name, "role": user.role}, "training": {"completed": complete, "total": total, "percent": round(complete / total * 100) if total else 0}, "certificates": len(certificates), "points": sum((item.best_score or 0) * 5 for item in enrollments), "open_actions": sum(item.status in {"in_progress", "assigned"} for item in enrollments)}
+    training_percent = _round_half_up(complete / total * 100) if total else 0
+    components = [{"key": "training", "label": "Training completion", "percent": training_percent}]
+    currency = _certificate_currency(certificates)
+    if currency is not None:
+        components.append({"key": "cert_currency", "label": "Certificates current (not expired)", "percent": currency})
+    return {"user": {"name": user.full_name, "role": user.role}, "training": {"completed": complete, "total": total, "percent": training_percent}, "certificates": len(certificates), "points": sum((item.best_score or 0) * 5 for item in enrollments), "open_actions": sum(item.status in {"in_progress", "assigned"} for item in enrollments), "readiness": _score_from_components(components), "gamification": _build_gamification(complete, total, enrollments)}
+
+
+# -----------------------------------------------------------------------
+# Manager dashboard (BUILD PROMPT v4 item 4) — RBAC-scoped to "my team",
+# reusing department_id as the reporting-line signal since that's the
+# only one that already exists on User; there is no real org-chart/
+# reports-to model yet. "manager" was already a valid role value on the
+# admin Employees form before this route existed — nothing previously
+# treated it differently from "employee".
+# -----------------------------------------------------------------------
+@app.get("/api/v1/manager/dashboard")
+def manager_dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.role not in ("manager", "admin"):
+        raise HTTPException(403, "Manager permission required.")
+    if not user.department_id:
+        raise HTTPException(409, "Your account isn't linked to a department yet. Ask an admin to assign one.")
+    dept = db.scalar(select(Department).where(Department.id == user.department_id, Department.org_id == user.org_id))
+    team = db.scalars(select(User).where(User.org_id == user.org_id, User.department_id == user.department_id, User.is_active == True)).all()  # noqa: E712
+    total_modules = db.scalar(select(func.count()).select_from(TrainingModule).where(TrainingModule.org_id == user.org_id, TrainingModule.status == "published")) or 0
+    today = date.today()
+    members = []
+    for member in team:
+        rows = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == member.id)).all()
+        completed = sum(1 for r in rows if r.status == "completed")
+        overdue = sum(1 for r in rows if r.due_date and r.due_date < today and r.status != "completed")
+        percent = _round_half_up(completed / total_modules * 100) if total_modules else 0
+        members.append({"id": member.id, "name": member.full_name, "email": member.email, "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue})
+    team_total = sum(m["total"] for m in members)
+    team_completed = sum(m["completed"] for m in members)
+    team_percent = _round_half_up(team_completed / team_total * 100) if team_total else 0
+    team_readiness = _score_from_components([{"key": "training", "label": "Team training completion", "percent": team_percent}])
+    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, Activity.department == dept.name)).all() if dept else []
+    return {
+        "department": {"id": dept.id, "name": dept.name} if dept else None,
+        "team_readiness": team_readiness,
+        "members": members,
+        "overdue_total": sum(m["overdue_count"] for m in members),
+        "activities": [activity_dict(a) for a in activities],
+    }
+
+
+def _notification_dict(item: Notification) -> dict:
+    return {"id": item.id, "kind": item.kind, "subject": item.subject, "payload": item.payload, "created_at": item.created_at.isoformat(), "read_at": item.read_at.isoformat() if item.read_at else None}
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    _enqueue_reminders(db, user.org_id)
+    db.commit()
+    rows = db.scalars(select(Notification).where(Notification.org_id == user.org_id, Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(30)).all()
+    return {"notifications": [_notification_dict(n) for n in rows], "unread_count": sum(1 for n in rows if not n.read_at)}
+
+
+@app.post("/api/v1/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    notif = db.get(Notification, notification_id)
+    if not notif or notif.org_id != user.org_id or notif.user_id != user.id:
+        raise HTTPException(404, "Notification not found.")
+    notif.read_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/notifications/read-all")
+def mark_all_notifications_read(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(Notification).where(Notification.org_id == user.org_id, Notification.user_id == user.id, Notification.read_at.is_(None))).all()
+    for n in rows:
+        n.read_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "marked": len(rows)}
 
 
 @app.get("/api/v1/activities")
@@ -282,12 +462,30 @@ async def claude_summary(query: str, context: str) -> str | None:
         return None
 
 
+_SEARCH_STOP_WORDS = {"a", "an", "and", "can", "do", "does", "for", "how", "i", "is", "my", "of", "process", "request", "the", "to", "what", "where", "who"}
+
+
+# Extracts real keywords from a natural-language question instead of
+# ILIKE-matching the whole raw sentence (which the Edge Function this
+# backend mirrors never did either — a mismatch caught while wiring the AI
+# assistant into every screen: "who do I ask about leave" matched zero rows
+# here because no activity name literally contains that whole phrase, while
+# the Edge Function already stripped it down to the single term "leave").
+def _search_terms(query: str) -> list[str]:
+    words = [re.sub(r"[^a-z0-9-]", "", w) for w in query.lower().split()]
+    terms = [w for w in words if len(w) > 2 and w not in _SEARCH_STOP_WORDS][:6]
+    return terms or [query.lower()]
+
+
 @app.post("/api/v1/search")
 async def knowledge_search(payload: SearchRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    needle = f"%{payload.query}%"
-    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, or_(Activity.name.ilike(needle), Activity.department.ilike(needle), Activity.responsible_role.ilike(needle))).limit(5)).all()
-    modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id, or_(TrainingModule.title.ilike(needle), TrainingModule.objective.ilike(needle))).limit(5)).all()
-    mistakes = db.scalars(select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.status == "active", or_(MistakeRegisterEntry.title.ilike(needle), MistakeRegisterEntry.description.ilike(needle))).limit(3)).all()
+    terms = _search_terms(payload.query)
+    activity_clause = or_(*[or_(Activity.name.ilike(f"%{t}%"), Activity.department.ilike(f"%{t}%"), Activity.responsible_role.ilike(f"%{t}%")) for t in terms])
+    module_clause = or_(*[or_(TrainingModule.title.ilike(f"%{t}%"), TrainingModule.objective.ilike(f"%{t}%"), TrainingModule.code.ilike(f"%{t}%")) for t in terms])
+    mistake_clause = or_(*[or_(MistakeRegisterEntry.title.ilike(f"%{t}%"), MistakeRegisterEntry.description.ilike(f"%{t}%"), MistakeRegisterEntry.category.ilike(f"%{t}%")) for t in terms])
+    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, activity_clause).limit(5)).all()
+    modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id, module_clause).limit(5)).all()
+    mistakes = db.scalars(select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.status == "active", mistake_clause).limit(3)).all()
     # SOP documents live in SOPGalaxy, not a table this backend queries — the
     # only SOP-related signal in context is each activity's own sop_link.
     context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" + (f"; SOP: {a.sop_link}" if a.sop_link else "") for a in activities] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules] + [f"Common mistake {mk.code}: {mk.title}. {mk.description} Correct practice: {mk.correct_practice}" for mk in mistakes])
@@ -310,7 +508,56 @@ def analytics(user: User = Depends(admin_user), db: Session = Depends(get_db)):
     total_enrollments = db.scalar(select(func.count()).select_from(Enrollment).where(Enrollment.org_id == user.org_id)) or 0
     complete = db.scalar(select(func.count()).select_from(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.status == "completed")) or 0
     average = db.scalar(select(func.avg(QuizAttempt.score)).where(QuizAttempt.org_id == user.org_id)) or 0
-    return {"employees": employees, "training_completion": round(complete / total_enrollments * 100) if total_enrollments else 0, "certificates": db.scalar(select(func.count()).select_from(Certificate).where(Certificate.org_id == user.org_id)) or 0, "average_quiz_score": round(float(average), 1), "open_feedback": db.scalar(select(func.count()).select_from(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.status == "open")) or 0, "activities": db.scalar(select(func.count()).select_from(Activity).where(Activity.org_id == user.org_id)) or 0}
+    training_percent = round(complete / total_enrollments * 100) if total_enrollments else 0
+    certificates = db.scalars(select(Certificate).where(Certificate.org_id == user.org_id)).all()
+    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id)).all()
+    raci_coverage = None
+    if activities:
+        named = sum(1 for a in activities if (a.current_person or "").strip().lower() != "organisation to confirm")
+        raci_coverage = _round_half_up(named / len(activities) * 100)
+    readiness_components = [{"key": "training", "label": "Org-wide training completion", "percent": training_percent}]
+    currency = _certificate_currency(certificates)
+    if currency is not None:
+        readiness_components.append({"key": "cert_currency", "label": "Certificates current (not expired)", "percent": currency})
+    if raci_coverage is not None:
+        readiness_components.append({"key": "raci_coverage", "label": "Responsibilities with a named owner", "percent": raci_coverage})
+    readiness = _score_from_components(readiness_components)
+    _capture_readiness_snapshot(db, user.org_id, readiness)
+    db.commit()
+    return {"employees": employees, "training_completion": training_percent, "certificates": len(certificates), "average_quiz_score": round(float(average), 1), "open_feedback": db.scalar(select(func.count()).select_from(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.status == "open")) or 0, "activities": len(activities), "readiness": readiness}
+
+
+@app.get("/api/v1/admin/exec")
+def exec_health(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    trend = db.scalars(select(ReadinessSnapshot).where(ReadinessSnapshot.org_id == user.org_id).order_by(ReadinessSnapshot.captured_at)).all()
+    departments = db.scalars(select(Department).where(Department.org_id == user.org_id).order_by(Department.name)).all()
+    dept_users = db.scalars(select(User).where(User.org_id == user.org_id)).all()
+    enrollments = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id)).all()
+    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id)).all()
+    users_by_dept: dict[str, list[str]] = {}
+    for u in dept_users:
+        if u.department_id:
+            users_by_dept.setdefault(u.department_id, []).append(u.id)
+    enrollments_by_user: dict[str, list[Enrollment]] = {}
+    for e in enrollments:
+        enrollments_by_user.setdefault(e.user_id, []).append(e)
+    activities_by_dept: dict[str, list[Activity]] = {}
+    for a in activities:
+        activities_by_dept.setdefault(a.department, []).append(a)
+    department_comparison = []
+    for d in departments:
+        user_ids = users_by_dept.get(d.id, [])
+        rows = [e for uid in user_ids for e in enrollments_by_user.get(uid, [])]
+        total, complete = len(rows), sum(1 for e in rows if e.status == "completed")
+        dept_activities = activities_by_dept.get(d.name, [])
+        owned = sum(1 for a in dept_activities if (a.current_person or "").strip().lower() != "organisation to confirm")
+        department_comparison.append({
+            "id": d.id, "name": d.name, "employee_count": len(user_ids),
+            "readiness_score": _round_half_up(complete / total * 100) if total else None,
+            "ownership_coverage": _round_half_up(owned / len(dept_activities) * 100) if dept_activities else None,
+            "activity_count": len(dept_activities),
+        })
+    return {"trend": [{"score": s.score, "captured_at": s.captured_at.isoformat()} for s in trend], "departments": department_comparison}
 
 
 @app.get("/api/v1/admin/audit")
@@ -326,7 +573,23 @@ def audit_log(page: int = Query(default=1, ge=1), page_size: int = Query(default
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/admin/departments")
 def list_departments(user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    return [row_dict(d) for d in db.scalars(select(Department).where(Department.org_id == user.org_id).order_by(Department.name)).all()]
+    departments = db.scalars(select(Department).where(Department.org_id == user.org_id).order_by(Department.name)).all()
+    dept_users = db.scalars(select(User).where(User.org_id == user.org_id)).all()
+    enrollments = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id)).all()
+    users_by_dept: dict[str, list[str]] = {}
+    for u in dept_users:
+        if u.department_id:
+            users_by_dept.setdefault(u.department_id, []).append(u.id)
+    enrollments_by_user: dict[str, list[Enrollment]] = {}
+    for e in enrollments:
+        enrollments_by_user.setdefault(e.user_id, []).append(e)
+    result = []
+    for d in departments:
+        user_ids = users_by_dept.get(d.id, [])
+        rows = [e for uid in user_ids for e in enrollments_by_user.get(uid, [])]
+        total, complete = len(rows), sum(1 for e in rows if e.status == "completed")
+        result.append({**row_dict(d), "employee_count": len(user_ids), "readiness_score": _round_half_up(complete / total * 100) if total else None})
+    return result
 
 
 @app.post("/api/v1/admin/departments", status_code=201)
