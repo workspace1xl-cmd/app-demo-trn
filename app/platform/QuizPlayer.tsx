@@ -118,6 +118,11 @@ export default function QuizPlayer({
         <div className={styles.modalFooter}>
           {!result ? (
             <>
+              {!loading && quiz && !allAnswered && (
+                <small style={{ marginRight: "auto", alignSelf: "center", color: "#7b7f8f" }}>
+                  Select an answer for every question to continue.
+                </small>
+              )}
               <button type="button" className={styles.secondaryBtn} onClick={onClose} disabled={submitting}>
                 Cancel
               </button>
