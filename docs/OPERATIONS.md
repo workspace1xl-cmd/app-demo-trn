@@ -22,7 +22,7 @@ No AWS deployment is required for the current pilot.
 | `SUPABASE_PROJECT_REF` | `bnzcjjdhfsdedwljdmjl` |
 | `SUPABASE_DB_PASSWORD` | the project's Postgres password |
 
-Vercel already deploys `main` through its own GitHub integration; the workflow does not duplicate that unless a `VERCEL_TOKEN` secret is also present, in which case it runs an explicit production deploy as a safety net.
+Vercel already deploys `main` through its own GitHub integration; this workflow does not duplicate that — it only migrates the database and deploys the `onework-api` Edge Function.
 
 `.github/workflows/ci.yml` runs `npm run lint`, `npm run build` and both backend test files on every push and pull request, independent of deployment.
 
@@ -32,7 +32,7 @@ To run the same migration and function deploy from a local machine instead of CI
 npm run deploy:all
 ```
 
-This runs `supabase link`, `supabase db push --include-all` and `supabase functions deploy onework-api` through `npx`, so no global CLI install is required.
+This runs `scripts/db-push.sh` (which pushes migrations via a direct `--db-url` connection string, deliberately skipping `supabase link` — see the comment in that script for why) and `supabase functions deploy onework-api` through `npx`, so no global CLI install is required.
 
 ## Add management's Claude API key
 

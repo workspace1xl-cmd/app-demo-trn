@@ -25,15 +25,19 @@ jobs:
       - name: Install Supabase CLI
         run: npm install -g supabase
 
-      - name: Link project
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}" -p "${{ secrets.SUPABASE_DB_PASSWORD }}"
-
       - name: Apply pending migrations
+        # `supabase link` is deliberately not used here: as of CLI 2.112.0 it
+        # calls the platform's project API-keys endpoint, whose response the
+        # CLI's own schema validator rejects (SchemaError on `inserted_at`),
+        # failing every deploy with "failed to get api keys" even though
+        # nothing about this project's migrations or functions is broken.
+        # scripts/db-push.sh talks to Postgres directly via --db-url and
+        # never calls that endpoint, so it sidesteps the bug entirely.
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: supabase db push --include-all -p "${{ secrets.SUPABASE_DB_PASSWORD }}"
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: bash scripts/db-push.sh
 
       - name: Deploy onework-api Edge Function
         env:
