@@ -375,12 +375,19 @@ export default function WorkingPlatform() {
   return (
     <main className={styles.shell}>
       <aside>
-        <Link className={styles.logo} href="/">
+        <button
+          type="button"
+          className={styles.logo}
+          onClick={() => {
+            setData(null);
+            setView("dashboard");
+          }}
+        >
           <span>1</span>
           <b>
             OneWork<small>LIVE PLATFORM</small>
           </b>
-        </Link>
+        </button>
         <nav>
           {nav.map(([id, icon, label]) => (
             <button
