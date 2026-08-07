@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import styles from "./platform.module.css";
-import { API, request } from "./page";
-import type { AdminSection } from "./page";
+import { API, request } from "./PlatformApp";
+import type { AdminSection } from "./PlatformApp";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
