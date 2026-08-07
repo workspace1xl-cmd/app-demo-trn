@@ -14,27 +14,31 @@ type Session = {
   access_token: string;
   user: { name: string; email: string; role: string; org_name?: string | null };
 };
+// SOP body/versioning/document management lives entirely in SOPGalaxy
+// (https://app.sopgalaxy.com/) — OneWork doesn't own, track status on, or
+// display a UI around SOP documents. There is deliberately no "sops" view:
+// the sidebar item below opens SOPGalaxy directly in a new tab, and the
+// only trace of SOPs OneWork keeps is a plain URL field (sop_link) on each
+// Responsibility Matrix row.
 type View =
   | "dashboard"
   | "search"
   | "training"
   | "matrix"
-  | "sops"
   | "certificates"
   | "admin";
-const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "sops", "certificates", "admin"];
+const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "certificates", "admin"];
 export type AdminSection =
   | "overview"
   | "employees"
   | "departments"
   | "matrix"
-  | "sops"
   | "training"
   | "assignments"
   | "content"
   | "feedback"
   | "audit";
-const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "matrix", "sops", "training", "assignments", "content", "feedback", "audit"];
+const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "matrix", "training", "assignments", "content", "feedback", "audit"];
 
 type Activity = {
   id: string; name: string; department: string; responsible_role: string;
@@ -94,10 +98,9 @@ function renderMarkdownLite(text: string) {
     );
   });
 }
-type Sop = { id: string; code: string; department: string; title: string; summary: string; version: string; status: string };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
-type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; sops: number; open_feedback: number };
-type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Sop[] | Certificate[] | AdminData | null;
+type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; open_feedback: number };
+type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | AdminData | null;
 
 export async function request<T = PlatformData>(
   path: string,
@@ -215,7 +218,6 @@ export default function WorkingPlatform() {
       search: `/api/v1/search`,
       training: "/api/v1/training/modules",
       matrix: "/api/v1/activities",
-      sops: "/api/v1/sops",
       certificates: "/api/v1/certificates",
       admin: "/api/v1/admin/analytics",
     };
@@ -424,7 +426,6 @@ export default function WorkingPlatform() {
     ["search", "⌕", "Knowledge search"],
     ["training", "◈", "My learning"],
     ["matrix", "◎", "Who does what"],
-    ["sops", "▤", "SOP repository"],
     ["certificates", "◇", "Certificates"],
     ...(session.user.role === "admin"
       ? [["admin", "⚙", "Admin analytics"] as [View, string, string]]
@@ -437,7 +438,6 @@ export default function WorkingPlatform() {
   const searchData = view === "search" ? data as SearchData | null : null;
   const trainingData = view === "training" && Array.isArray(data) ? data as TrainingModule[] : null;
   const matrixData = view === "matrix" && Array.isArray(data) ? data as Activity[] : null;
-  const sopData = view === "sops" && Array.isArray(data) ? data as Sop[] : null;
   const certificateData = view === "certificates" && Array.isArray(data) ? data as Certificate[] : null;
   const adminData = view === "admin" ? data as AdminData | null : null;
   return (
@@ -461,6 +461,16 @@ export default function WorkingPlatform() {
               {label}
             </button>
           ))}
+          {/* SOP documents live in SOPGalaxy, not OneWork — this opens it
+              directly rather than routing to an in-app SOP screen. */}
+          <button
+            type="button"
+            title="Open SOPGalaxy"
+            onClick={() => window.open("https://app.sopgalaxy.com/", "_blank", "noopener,noreferrer")}
+          >
+            <span>▤</span>
+            SOP repository ↗
+          </button>
         </nav>
         <div className={styles.user}>
           <span>
@@ -687,29 +697,22 @@ export default function WorkingPlatform() {
                     <small>{a.escalation_level_2}</small>
                   </span>
                   <span>
-                    <b>{a.sop_link}</b>
+                    {/* sop_link is a plain URL into SOPGalaxy, not a record
+                        OneWork owns — render it as a real link when it looks
+                        like one, otherwise as inert text (legacy values from
+                        before the SOP repository was removed). */}
+                    {a.sop_link && /^https?:\/\//.test(a.sop_link) ? (
+                      <a href={a.sop_link} target="_blank" rel="noopener noreferrer">
+                        Open in SOPGalaxy ↗
+                      </a>
+                    ) : (
+                      <b>{a.sop_link || "—"}</b>
+                    )}
                     <small>{a.training_module_link}</small>
                   </span>
                 </article>
               ))}
               {matrixData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
-            </div>
-          )}
-          {!busy && sopData && (
-            <div className={styles.cards}>
-              {sopData.map((s) => (
-                <article key={s.id}>
-                  <span>{s.code}</span>
-                  <small>{s.department}</small>
-                  <h3>{s.title}</h3>
-                  <p>{s.summary}</p>
-                  <div>
-                    <b>v{s.version}</b>
-                    <em>{s.status}</em>
-                  </div>
-                </article>
-              ))}
-              {sopData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
           {!busy && certificateData && (
@@ -755,7 +758,6 @@ export default function WorkingPlatform() {
                   ["employees", "Employees"],
                   ["departments", "Departments"],
                   ["matrix", "Responsibility Matrix"],
-                  ["sops", "SOP Approval"],
                   ["training", "Training & Quiz Builder"],
                   ["assignments", "Assignments"],
                   ["content", "Content Library"],
@@ -799,11 +801,6 @@ export default function WorkingPlatform() {
                 label="ACTIVITIES"
                 value={adminData.activities}
                 note="Responsibility records"
-              />
-              <Stat
-                label="CONTROLLED SOPS"
-                value={adminData.sops}
-                note="Versioned procedures"
               />
               <Stat
                 label="OPEN FEEDBACK"

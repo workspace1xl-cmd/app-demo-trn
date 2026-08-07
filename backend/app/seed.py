@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, Organization, QuizQuestion, SOPDocument, TrainingModule, User
+from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, Organization, QuizQuestion, TrainingModule, User
 from .security import hash_password
 
 
@@ -57,14 +57,6 @@ ACTIVITIES = [
     ("Sales Support", "Sales", "Sales Operations Lead", "salesops@company.com", "3 business days", "Sales Head", "COO", "SOP-17", "TRN-15"),
 ]
 
-SOPS = [
-    ("SOP-01", "Leave & Attendance", "Human Resources"), ("SOP-02", "Asset Request, Allocation & Return", "Information Technology"),
-    ("SOP-03", "IT Support & Incident Triage", "Information Technology"), ("SOP-04", "Software Access & Permissions", "Information Technology"),
-    ("SOP-05", "Employee Exit & Handover", "Human Resources"), ("SOP-06", "Payroll Query Resolution", "Human Resources"),
-    ("SOP-07", "Purchase & Finance Approval", "Finance / Procurement"), ("SOP-08", "Vendor Onboarding & Changes", "Procurement"),
-    ("SOP-09", "Recruitment & Referral", "Human Resources"), ("SOP-10", "Expense Reimbursement", "Finance"),
-]
-
 # Mock common-mistake register. Replaced wholesale once the real survey is
 # uploaded through /api/v1/admin/mistakes/replace-seed (Edge API).
 MISTAKES = [
@@ -101,8 +93,6 @@ def seed_database(db: Session) -> None:
     db.add(Certificate(org_id=org.id, user_id=employee.id, module_id=modules[0].id, certificate_number="OW-WPB-2026-0001", issued_at=date.today() - timedelta(days=20), expires_at=date.today() + timedelta(days=345)))
     for name, department, role, contact, sla, l1, l2, sop, module in ACTIVITIES:
         db.add(Activity(org_id=org.id, name=name, department=department, responsible_role=role, current_person="Organisation to confirm", backup_person=f"{department} backup", contact_details=contact, sla=sla, escalation_level_1=l1, escalation_level_2=l2, related_documents=[f"{sop} form or checklist"], sop_link=sop, training_module_link=module, process_steps=["Open the official request channel", "Provide the required information and evidence", "Track the published SLA", f"Escalate to {l1} if unresolved"]))
-    for code, title, department in SOPS:
-        db.add(SOPDocument(org_id=org.id, code=code, title=title, department=department, owner_role=f"{department} process owner", approver_role=f"{department} head", version="1.0", status="effective", effective_date=date.today(), review_date=date.today() + timedelta(days=180), summary=f"Controlled procedure for {title.lower()}.", content={"purpose": f"Standardise {title.lower()}", "scope": "All employees", "steps": ["Use the official channel", "Complete required fields", "Retain evidence", "Escalate within the published hierarchy"], "controls": ["Owner approval", "Version control", "Audit trail"]}))
     module_by_code = {m.code: m for m in modules}
     for code, title, description, correct_practice, category, severity, module_code in MISTAKES:
         db.add(MistakeRegisterEntry(org_id=org.id, code=code, title=title, description=description, correct_practice=correct_practice, category=category, severity=severity, module_id=module_by_code[module_code].id, is_seed=True))

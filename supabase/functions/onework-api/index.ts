@@ -148,10 +148,6 @@ Deno.serve(async (req) => {
       const { data, error } = await request; if (error) throw error; return json(data);
     }
 
-    if (path === "/api/v1/sops" && req.method === "GET") {
-      const { data, error } = await supabase.from("sop_documents").select("*").eq("org_id", user.org_id).order("code"); if (error) throw error; return json(data);
-    }
-
     if (path === "/api/v1/training/modules" && req.method === "GET") {
       const [{ data: modules, error }, { data: enrollment }, { data: resources }] = await Promise.all([
         supabase.from("training_modules").select("*").eq("org_id", user.org_id).order("sequence"),
@@ -231,17 +227,19 @@ Deno.serve(async (req) => {
       const terms = safe.toLowerCase().split(/\s+/).map((term) => term.replace(/[^a-z0-9-]/g, "")).filter((term) => term.length > 2 && !stopWords.has(term)).slice(0, 6);
       const searchTerms = terms.length ? terms : [safe.toLowerCase()];
       const activityFilters = searchTerms.flatMap((term) => [`name.ilike.%${term}%`, `department.ilike.%${term}%`, `responsible_role.ilike.%${term}%`]).join(",");
-      const sopFilters = searchTerms.flatMap((term) => [`title.ilike.%${term}%`, `summary.ilike.%${term}%`, `department.ilike.%${term}%`]).join(",");
       const moduleFilters = searchTerms.flatMap((term) => [`title.ilike.%${term}%`, `objective.ilike.%${term}%`, `code.ilike.%${term}%`]).join(",");
       const mistakeFilters = searchTerms.flatMap((term) => [`title.ilike.%${term}%`, `description.ilike.%${term}%`, `category.ilike.%${term}%`]).join(",");
-      const [{ data: activities }, { data: sops }, { data: modules }, { data: mistakes }] = await Promise.all([
+      // SOP documents live in SOPGalaxy, not a table this API queries — the
+      // only SOP-related signal in context is each activity's own sop_link
+      // (a plain URL), included inline below when present, not a separate
+      // sop_documents lookup.
+      const [{ data: activities }, { data: modules }, { data: mistakes }] = await Promise.all([
         supabase.from("activities").select("*").eq("org_id", user.org_id).or(activityFilters).limit(5),
-        supabase.from("sop_documents").select("*").eq("org_id", user.org_id).or(sopFilters).limit(5),
         supabase.from("training_modules").select("*").eq("org_id", user.org_id).or(moduleFilters).limit(5),
         supabase.from("mistake_register").select("code,title,description,correct_practice,severity").eq("org_id", user.org_id).eq("status", "active").or(mistakeFilters).limit(3),
       ]);
-      const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}`), ...(sops || []).map((s) => `SOP: ${s.code} ${s.title}; ${s.summary}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`)].join("\n");
-      const claude = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (sops?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0);
+      const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}${a.sop_link ? `; SOP: ${a.sop_link}` : ""}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`)].join("\n");
+      const claude = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0);
       // `escalate` now comes from a fixed STATUS: token Claude is asked to
       // emit first, parsed exactly — not guessed by regex-matching whatever
       // prose Claude happened to write. The regex approach was genuinely
@@ -251,7 +249,7 @@ Deno.serve(async (req) => {
       // calls, sometimes tripping the regex and sometimes not.
       const unresolved = count === 0 || (claude?.escalate ?? false);
       await audit(user, "knowledge.search", "search", undefined, { query: safe, result_count: count, ai_used: Boolean(claude), unresolved });
-      return json({ query: safe, answer: claude?.answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(claude), activities: activities || [], sops: sops || [], modules: modules || [], mistakes: mistakes || [], unresolved });
+      return json({ query: safe, answer: claude?.answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(claude), activities: activities || [], modules: modules || [], mistakes: mistakes || [], unresolved });
     }
 
     if (path === "/api/v1/feedback" && req.method === "POST") {
@@ -266,9 +264,9 @@ Deno.serve(async (req) => {
       // Counts every org member (matches the Employees tab's total, which
       // also lists admins), not just role=employee — the two used to
       // disagree because this query filtered by role and that one doesn't.
-      const [employees, enrollment, certificates, attempts, feedback, activities, sops] = await Promise.all([supabase.from("app_users").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("enrollments").select("status").eq("org_id", user.org_id), supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("quiz_attempts").select("score").eq("org_id", user.org_id), supabase.from("knowledge_feedback").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "open"), supabase.from("activities").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("sop_documents").select("id", { count: "exact", head: true }).eq("org_id", user.org_id)]);
+      const [employees, enrollment, certificates, attempts, feedback, activities] = await Promise.all([supabase.from("app_users").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("enrollments").select("status").eq("org_id", user.org_id), supabase.from("certificates").select("id", { count: "exact", head: true }).eq("org_id", user.org_id), supabase.from("quiz_attempts").select("score").eq("org_id", user.org_id), supabase.from("knowledge_feedback").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "open"), supabase.from("activities").select("id", { count: "exact", head: true }).eq("org_id", user.org_id)]);
       const total = enrollment.data?.length || 0, complete = enrollment.data?.filter((item) => item.status === "completed").length || 0, scores = attempts.data?.map((item) => item.score) || [];
-      return json({ employees: employees.count || 0, training_completion: total ? Math.round(complete / total * 100) : 0, certificates: certificates.count || 0, average_quiz_score: scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length*10)/10 : 0, open_feedback: feedback.count || 0, activities: activities.count || 0, sops: sops.count || 0 });
+      return json({ employees: employees.count || 0, training_completion: total ? Math.round(complete / total * 100) : 0, certificates: certificates.count || 0, average_quiz_score: scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length*10)/10 : 0, open_feedback: feedback.count || 0, activities: activities.count || 0 });
     }
 
     if (path === "/api/v1/admin/audit" && req.method === "GET") {
@@ -381,44 +379,10 @@ Deno.serve(async (req) => {
       await audit(user, "activity.update", "activity", data.id, patch); return json(data);
     }
 
-    // -------------------------------------------------------------------
-    // Administrator: SOP editor and approval workflow
-    // -------------------------------------------------------------------
-    if (path === "/api/v1/admin/sops" && req.method === "POST") {
-      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const body = await req.json();
-      for (const field of ["code","title","department","owner_role","approver_role","summary"]) {
-        if (!body[field]?.toString().trim()) return fieldError(field, `${field.replace(/_/g, " ")} is required.`);
-      }
-      const { data, error } = await supabase.from("sop_documents").insert({ org_id: user.org_id, code: body.code.trim().toUpperCase(), title: body.title.trim(), department: body.department.trim(), owner_role: body.owner_role.trim(), approver_role: body.approver_role.trim(), summary: body.summary.trim(), content: body.content || {}, status: "draft" }).select().single();
-      if (error) return json({ detail: "An SOP with this code already exists." }, 409);
-      await audit(user, "sop.create", "sop", data.id); return json(data, 201);
-    }
-    const sopMatch = path.match(/^\/api\/v1\/admin\/sops\/([^/]+)$/);
-    if (sopMatch && req.method === "PATCH") {
-      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const body = await req.json(); const editable = ["title","department","owner_role","approver_role","summary","content","version"];
-      const patch: Record<string, unknown> = {}; for (const key of editable) if (body[key] !== undefined) patch[key] = body[key];
-      const { data, error } = await supabase.from("sop_documents").update(patch).eq("id", sopMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
-      if (error) throw error; if (!data) return json({ detail: "SOP not found." }, 404);
-      await audit(user, "sop.update", "sop", data.id); return json(data);
-    }
-    const sopWorkflowMatch = path.match(/^\/api\/v1\/admin\/sops\/([^/]+)\/(submit|approve|retire)$/);
-    if (sopWorkflowMatch && req.method === "POST") {
-      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const [, sopId, action] = sopWorkflowMatch;
-      const { data: sop } = await supabase.from("sop_documents").select("*").eq("id", sopId).eq("org_id", user.org_id).maybeSingle();
-      if (!sop) return json({ detail: "SOP not found." }, 404);
-      const transitions: Record<string, { from: string[]; to: string; patch: Record<string, unknown> }> = {
-        submit: { from: ["draft"], to: "in_review", patch: { submitted_by: user.id, submitted_at: new Date().toISOString() } },
-        approve: { from: ["in_review"], to: "effective", patch: { approved_by: user.id, approved_at: new Date().toISOString(), effective_date: new Date().toISOString().slice(0,10), review_date: new Date(Date.now() + 180 * 86400000).toISOString().slice(0,10) } },
-        retire: { from: ["effective","approved"], to: "archived", patch: {} },
-      };
-      const transition = transitions[action];
-      if (!transition.from.includes(sop.status)) return json({ detail: `An SOP in ${sop.status} status cannot be ${action === "submit" ? "submitted" : action === "approve" ? "approved" : "retired"}.` }, 409);
-      const { data, error } = await supabase.from("sop_documents").update({ status: transition.to, ...transition.patch }).eq("id", sopId).select().single();
-      if (error) throw error; await audit(user, `sop.${action}`, "sop", sopId, { status: transition.to }); return json(data);
-    }
+    // SOP documents live in SOPGalaxy (https://app.sopgalaxy.com/), not
+    // here — no editor, no approval workflow, no status tracking. The only
+    // trace of SOPs this API touches is activities.sop_link, a plain URL
+    // edited through /api/v1/admin/activities above.
 
     // -------------------------------------------------------------------
     // Administrator: training module and quiz builder
