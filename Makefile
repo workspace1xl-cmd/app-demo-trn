@@ -10,7 +10,7 @@ logs:
 	docker compose logs -f --tail=100
 
 test-api:
-	cd backend && python -m pytest -q
+	cd backend && python -m pytest tests/test_api.py -q && python -m pytest tests/test_admin.py -q
 
 build:
 	npm run build

@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
-from .models import Activity, AuditEvent, Certificate, Enrollment, KnowledgeFeedback, Organization, QuizAttempt, QuizQuestion, SOPDocument, TrainingModule, User
-from .schemas import ActivityCreate, FeedbackRequest, LoginRequest, ModuleCreate, QuizSubmission, SOPCreate, SearchRequest, TokenResponse
-from .security import create_token, verify_password
+from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Organization, QuizAttempt, QuizQuestion, SOPDocument, TrainingModule, User
+from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, QuestionCreate, QuestionUpdate, QuizSubmission, SOPCreate, SOPUpdate, SearchRequest, TokenResponse
+from .security import create_token, hash_password, verify_password
 from .seed import seed_database
 
 
@@ -35,6 +35,23 @@ def module_dict(item: TrainingModule, enrollment: Enrollment | None = None) -> d
     data = {column.name: getattr(item, column.name) for column in item.__table__.columns}
     data["progress"] = None if not enrollment else {"status": enrollment.status, "percent": enrollment.progress_percent, "best_score": enrollment.best_score}
     return data
+
+
+def row_dict(item) -> dict:
+    return {column.name: getattr(item, column.name) for column in item.__table__.columns}
+
+
+def paginate_query(stmt, db: Session, page: int, page_size: int):
+    page_size = page_size if page_size in (10, 20, 50, 100) else 20
+    page = max(page, 1)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
+    return rows, {"page": page, "page_size": page_size, "total": total}
+
+
+def require_status(value: str | None, allowed: set[str], field: str) -> None:
+    if value is not None and value not in allowed:
+        raise HTTPException(400, {"detail": f"Select a valid {field}.", "field": field})
 
 
 @asynccontextmanager
@@ -98,9 +115,20 @@ def get_activity(activity_id: str, user: User = Depends(current_user), db: Sessi
     return activity_dict(item)
 
 
-@app.post("/api/v1/activities", status_code=status.HTTP_201_CREATED)
+@app.post("/api/v1/admin/activities", status_code=status.HTTP_201_CREATED)
 def create_activity(payload: ActivityCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    if db.scalar(select(Activity).where(Activity.org_id == user.org_id, Activity.name == payload.name)):
+        raise HTTPException(409, "An activity with this name already exists.")
     item = Activity(org_id=user.org_id, **payload.model_dump()); db.add(item); db.flush(); audit(db, user, "activity.create", "activity", item.id); db.commit(); return activity_dict(item)
+
+
+@app.patch("/api/v1/admin/activities/{activity_id}")
+def update_activity(activity_id: str, payload: ActivityUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(Activity).where(Activity.id == activity_id, Activity.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Activity not found.")
+    require_status(payload.status, {"draft", "confirmed", "archived"}, "status")
+    for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value)
+    db.flush(); audit(db, user, "activity.update", "activity", item.id); db.commit(); return activity_dict(item)
 
 
 @app.get("/api/v1/sops")
@@ -110,9 +138,42 @@ def list_sops(q: str | None = None, user: User = Depends(current_user), db: Sess
     return [sop_dict(item) for item in db.scalars(stmt.order_by(SOPDocument.code)).all()]
 
 
-@app.post("/api/v1/sops", status_code=201)
+@app.post("/api/v1/admin/sops", status_code=201)
 def create_sop(payload: SOPCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    item = SOPDocument(org_id=user.org_id, **payload.model_dump()); db.add(item); db.flush(); audit(db, user, "sop.create", "sop", item.id); db.commit(); return sop_dict(item)
+    if db.scalar(select(SOPDocument).where(SOPDocument.org_id == user.org_id, SOPDocument.code == payload.code)):
+        raise HTTPException(409, "An SOP with this code already exists.")
+    item = SOPDocument(org_id=user.org_id, status="draft", **payload.model_dump()); db.add(item); db.flush(); audit(db, user, "sop.create", "sop", item.id); db.commit(); return sop_dict(item)
+
+
+@app.patch("/api/v1/admin/sops/{sop_id}")
+def update_sop(sop_id: str, payload: SOPUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(SOPDocument).where(SOPDocument.id == sop_id, SOPDocument.org_id == user.org_id))
+    if not item: raise HTTPException(404, "SOP not found.")
+    for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value)
+    db.flush(); audit(db, user, "sop.update", "sop", item.id); db.commit(); return sop_dict(item)
+
+
+SOP_TRANSITIONS = {
+    "submit": ({"draft"}, "in_review"),
+    "approve": ({"in_review"}, "effective"),
+    "retire": ({"effective", "approved"}, "archived"),
+}
+
+
+@app.post("/api/v1/admin/sops/{sop_id}/{action}")
+def sop_workflow(sop_id: str, action: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    if action not in SOP_TRANSITIONS: raise HTTPException(404, "Route not found.")
+    item = db.scalar(select(SOPDocument).where(SOPDocument.id == sop_id, SOPDocument.org_id == user.org_id))
+    if not item: raise HTTPException(404, "SOP not found.")
+    allowed_from, target = SOP_TRANSITIONS[action]
+    if item.status not in allowed_from:
+        raise HTTPException(409, f"An SOP in {item.status} status cannot be {'submitted' if action == 'submit' else 'approved' if action == 'approve' else 'retired'}.")
+    item.status = target
+    if action == "submit": item.submitted_by = user.id; item.submitted_at = datetime.utcnow()
+    if action == "approve":
+        item.approved_by = user.id; item.approved_at = datetime.utcnow()
+        item.effective_date = date.today(); item.review_date = date.today() + timedelta(days=180)
+    db.flush(); audit(db, user, f"sop.{action}", "sop", item.id, {"status": target}); db.commit(); return sop_dict(item)
 
 
 @app.get("/api/v1/training/modules")
@@ -122,9 +183,54 @@ def list_modules(user: User = Depends(current_user), db: Session = Depends(get_d
     return [module_dict(item, enrolled.get(item.id)) for item in modules]
 
 
-@app.post("/api/v1/training/modules", status_code=201)
+@app.post("/api/v1/admin/training/modules", status_code=201)
 def create_module(payload: ModuleCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    item = TrainingModule(org_id=user.org_id, **payload.model_dump()); db.add(item); db.flush(); audit(db, user, "module.create", "training_module", item.id); db.commit(); return module_dict(item)
+    if db.scalar(select(TrainingModule).where(TrainingModule.org_id == user.org_id, TrainingModule.code == payload.code)):
+        raise HTTPException(409, "A module with this code already exists.")
+    max_sequence = db.scalar(select(func.max(TrainingModule.sequence)).where(TrainingModule.org_id == user.org_id)) or 0
+    item = TrainingModule(org_id=user.org_id, sequence=max_sequence + 1, status="draft", **payload.model_dump())
+    db.add(item); db.flush()
+    employees = db.scalars(select(User).where(User.org_id == user.org_id, User.role == "employee", User.is_active == True)).all()  # noqa: E712
+    for employee in employees:
+        db.add(Enrollment(org_id=user.org_id, user_id=employee.id, module_id=item.id, status="locked", assigned_by=user.id, assigned_at=datetime.utcnow()))
+    audit(db, user, "module.create", "training_module", item.id); db.commit(); return module_dict(item)
+
+
+@app.patch("/api/v1/admin/training/modules/{module_id}")
+def update_module(module_id: str, payload: ModuleUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(TrainingModule).where(TrainingModule.id == module_id, TrainingModule.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Module not found.")
+    require_status(payload.status, {"draft", "published", "archived"}, "status")
+    for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value)
+    db.flush(); audit(db, user, "module.update", "training_module", item.id); db.commit(); return module_dict(item)
+
+
+@app.get("/api/v1/admin/training/modules/{module_id}/questions")
+def list_questions(module_id: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    return [row_dict(q) for q in db.scalars(select(QuizQuestion).where(QuizQuestion.org_id == user.org_id, QuizQuestion.module_id == module_id).order_by(QuizQuestion.created_at)).all()]
+
+
+@app.post("/api/v1/admin/training/modules/{module_id}/questions", status_code=201)
+def create_question(module_id: str, payload: QuestionCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    if payload.correct_index >= len(payload.options):
+        raise HTTPException(400, {"detail": "Select which option is correct.", "field": "correct_index"})
+    item = QuizQuestion(org_id=user.org_id, module_id=module_id, **payload.model_dump())
+    db.add(item); db.flush(); audit(db, user, "question.create", "quiz_question", item.id); db.commit(); return row_dict(item)
+
+
+@app.patch("/api/v1/admin/training/questions/{question_id}")
+def update_question(question_id: str, payload: QuestionUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(QuizQuestion).where(QuizQuestion.id == question_id, QuizQuestion.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Question not found.")
+    for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value)
+    db.flush(); audit(db, user, "question.update", "quiz_question", item.id); db.commit(); return row_dict(item)
+
+
+@app.delete("/api/v1/admin/training/questions/{question_id}")
+def delete_question(question_id: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(QuizQuestion).where(QuizQuestion.id == question_id, QuizQuestion.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Question not found.")
+    db.delete(item); audit(db, user, "question.delete", "quiz_question", question_id); db.commit(); return {"deleted": True}
 
 
 @app.get("/api/v1/training/modules/{module_id}/quiz")
@@ -164,6 +270,13 @@ def certificates(user: User = Depends(current_user), db: Session = Depends(get_d
     return [{"id": cert.id, "certificate_number": cert.certificate_number, "module": module.title, "issued_at": cert.issued_at, "expires_at": cert.expires_at} for cert, module in rows]
 
 
+@app.get("/api/v1/mistakes")
+def list_mistakes(q: str | None = None, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    stmt = select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.status == "active")
+    if q: stmt = stmt.where(or_(MistakeRegisterEntry.title.ilike(f"%{q}%"), MistakeRegisterEntry.description.ilike(f"%{q}%"), MistakeRegisterEntry.category.ilike(f"%{q}%")))
+    return [row_dict(item) for item in db.scalars(stmt.order_by(MistakeRegisterEntry.code)).all()]
+
+
 async def claude_summary(query: str, context: str) -> str | None:
     if not settings.anthropic_api_key: return None
     prompt = f"Answer the employee question only from the verified organisational context. Be concise. If context is insufficient, say it must be escalated.\nQuestion: {query}\nContext:\n{context}"
@@ -183,10 +296,11 @@ async def knowledge_search(payload: SearchRequest, user: User = Depends(current_
     activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, or_(Activity.name.ilike(needle), Activity.department.ilike(needle), Activity.responsible_role.ilike(needle))).limit(5)).all()
     sops = db.scalars(select(SOPDocument).where(SOPDocument.org_id == user.org_id, or_(SOPDocument.title.ilike(needle), SOPDocument.summary.ilike(needle))).limit(5)).all()
     modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id, or_(TrainingModule.title.ilike(needle), TrainingModule.objective.ilike(needle))).limit(5)).all()
-    context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" for a in activities] + [f"SOP: {s.code} {s.title}; {s.summary}" for s in sops] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules])
+    mistakes = db.scalars(select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.status == "active", or_(MistakeRegisterEntry.title.ilike(needle), MistakeRegisterEntry.description.ilike(needle))).limit(3)).all()
+    context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" for a in activities] + [f"SOP: {s.code} {s.title}; {s.summary}" for s in sops] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules] + [f"Common mistake {mk.code}: {mk.title}. {mk.description} Correct practice: {mk.correct_practice}" for mk in mistakes])
     ai_answer = await claude_summary(payload.query, context) if context else None
-    audit(db, user, "knowledge.search", "search", details={"query": payload.query, "result_count": len(activities) + len(sops) + len(modules), "ai_used": bool(ai_answer)}); db.commit()
-    return {"query": payload.query, "answer": ai_answer or (f"Verified results found for {payload.query}. Use the official owner, channel and SLA below." if context else "No confirmed answer was found. Report this question for owner review."), "confidence": 0.93 if activities else 0.72 if context else 0.0, "ai_used": bool(ai_answer), "activities": [activity_dict(a) for a in activities], "sops": [sop_dict(s) for s in sops], "modules": [module_dict(m) for m in modules], "unresolved": not bool(context)}
+    audit(db, user, "knowledge.search", "search", details={"query": payload.query, "result_count": len(activities) + len(sops) + len(modules) + len(mistakes), "ai_used": bool(ai_answer)}); db.commit()
+    return {"query": payload.query, "answer": ai_answer or (f"Verified results found for {payload.query}. Use the official owner, channel and SLA below." if context else "No confirmed answer was found. Report this question for owner review."), "confidence": 0.93 if activities else 0.72 if context else 0.0, "ai_used": bool(ai_answer), "activities": [activity_dict(a) for a in activities], "sops": [sop_dict(s) for s in sops], "modules": [module_dict(m) for m in modules], "mistakes": [row_dict(mk) for mk in mistakes], "unresolved": not bool(context)}
 
 
 @app.post("/api/v1/feedback", status_code=201)
@@ -204,6 +318,173 @@ def analytics(user: User = Depends(admin_user), db: Session = Depends(get_db)):
 
 
 @app.get("/api/v1/admin/audit")
-def audit_log(limit: int = Query(default=50, ge=1, le=200), user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    rows = db.scalars(select(AuditEvent).where(AuditEvent.org_id == user.org_id).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
-    return [{column.name: getattr(item, column.name) for column in item.__table__.columns} for item in rows]
+def audit_log(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stmt = select(AuditEvent).where(AuditEvent.org_id == user.org_id).order_by(AuditEvent.created_at.desc())
+    rows, meta = paginate_query(stmt, db, page, page_size)
+    actors = {a.id: a.full_name for a in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
+    return {"items": [{**row_dict(item), "actor": actors.get(item.actor_user_id, "System")} for item in rows], **meta}
+
+
+# ---------------------------------------------------------------------------
+# Administrator: departments
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/departments")
+def list_departments(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    return [row_dict(d) for d in db.scalars(select(Department).where(Department.org_id == user.org_id).order_by(Department.name)).all()]
+
+
+@app.post("/api/v1/admin/departments", status_code=201)
+def create_department(payload: DepartmentCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    if db.scalar(select(Department).where(Department.org_id == user.org_id, or_(Department.name == payload.name.strip(), Department.code == payload.code.strip().upper()))):
+        raise HTTPException(409, "A department with this name or code already exists.")
+    item = Department(org_id=user.org_id, name=payload.name.strip(), code=payload.code.strip().upper())
+    db.add(item); db.flush(); audit(db, user, "department.create", "department", item.id); db.commit(); return row_dict(item)
+
+
+@app.patch("/api/v1/admin/departments/{department_id}")
+def update_department(department_id: str, payload: DepartmentUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(Department).where(Department.id == department_id, Department.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Department not found.")
+    if payload.name: item.name = payload.name.strip()
+    if payload.code: item.code = payload.code.strip().upper()
+    db.flush(); audit(db, user, "department.update", "department", item.id); db.commit(); return row_dict(item)
+
+
+# ---------------------------------------------------------------------------
+# Administrator: employees
+# ---------------------------------------------------------------------------
+def employee_dict(item: User) -> dict:
+    return {"id": item.id, "email": item.email, "full_name": item.full_name, "role": item.role, "is_active": item.is_active, "department_id": item.department_id, "created_at": item.created_at}
+
+
+@app.get("/api/v1/admin/employees")
+def list_employees(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), q: str | None = None, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stmt = select(User).where(User.org_id == user.org_id)
+    if q: stmt = stmt.where(or_(User.full_name.ilike(f"%{q}%"), User.email.ilike(f"%{q}%")))
+    rows, meta = paginate_query(stmt.order_by(User.full_name), db, page, page_size)
+    departments = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == user.org_id)).all()}
+    return {"items": [{**employee_dict(item), "department_name": departments.get(item.department_id)} for item in rows], **meta}
+
+
+@app.post("/api/v1/admin/employees", status_code=201)
+def create_employee(payload: EmployeeCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    if payload.role not in {"employee", "manager", "content_admin", "admin"}:
+        raise HTTPException(400, {"detail": "Select a valid role.", "field": "role"})
+    if db.scalar(select(User).where(User.org_id == user.org_id, func.lower(User.email) == payload.email.lower())):
+        raise HTTPException(409, "An employee with this Email ID already exists.")
+    item = User(org_id=user.org_id, department_id=payload.department_id, email=payload.email.lower(), full_name=payload.full_name.strip(), role=payload.role, password_hash=hash_password(payload.password))
+    db.add(item); db.flush()
+    modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id).order_by(TrainingModule.sequence)).all()
+    for module in modules:
+        db.add(Enrollment(org_id=user.org_id, user_id=item.id, module_id=module.id, status="assigned" if module.sequence == 1 else "locked", assigned_by=user.id, assigned_at=datetime.utcnow()))
+    audit(db, user, "employee.create", "app_user", item.id, {"role": item.role}); db.commit(); return employee_dict(item)
+
+
+@app.patch("/api/v1/admin/employees/{employee_id}")
+def update_employee(employee_id: str, payload: EmployeeUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(User).where(User.id == employee_id, User.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Employee not found.")
+    if payload.role is not None:
+        if payload.role not in {"employee", "manager", "content_admin", "admin"}: raise HTTPException(400, {"detail": "Select a valid role.", "field": "role"})
+        item.role = payload.role
+    if payload.full_name is not None: item.full_name = payload.full_name.strip()
+    if payload.department_id is not None: item.department_id = payload.department_id or None
+    if payload.is_active is not None: item.is_active = payload.is_active
+    if payload.password:
+        item.password_hash = hash_password(payload.password)
+        audit(db, user, "employee.reset_password", "app_user", item.id)
+    db.flush(); audit(db, user, "employee.update", "app_user", item.id); db.commit(); return employee_dict(item)
+
+
+# ---------------------------------------------------------------------------
+# Administrator: assignment and due-date management
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/enrollments")
+def list_enrollments(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), module_id: str | None = None, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stmt = select(Enrollment).where(Enrollment.org_id == user.org_id)
+    if module_id: stmt = stmt.where(Enrollment.module_id == module_id)
+    rows, meta = paginate_query(stmt.order_by(Enrollment.due_date.is_(None), Enrollment.due_date), db, page, page_size)
+    employees = {u.id: {"id": u.id, "full_name": u.full_name, "email": u.email} for u in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
+    modules = {m.id: {"id": m.id, "title": m.title, "code": m.code} for m in db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id)).all()}
+    return {"items": [{"id": r.id, "status": r.status, "progress_percent": r.progress_percent, "best_score": r.best_score, "due_date": r.due_date, "completed_at": r.completed_at, "employee": employees.get(r.user_id), "module": modules.get(r.module_id)} for r in rows], **meta}
+
+
+@app.patch("/api/v1/admin/enrollments/{enrollment_id}")
+def update_enrollment(enrollment_id: str, payload: EnrollmentUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(Enrollment).where(Enrollment.id == enrollment_id, Enrollment.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Assignment not found.")
+    require_status(payload.status, {"locked", "assigned", "in_progress", "completed", "waived"}, "status")
+    if payload.status is not None: item.status = payload.status
+    if payload.due_date is not None: item.due_date = date.fromisoformat(payload.due_date) if payload.due_date else None
+    db.flush(); audit(db, user, "enrollment.update", "enrollment", item.id); db.commit(); return row_dict(item)
+
+
+@app.post("/api/v1/admin/enrollments/assign", status_code=201)
+def assign_module(payload: AssignRequest, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    due = date.fromisoformat(payload.due_date) if payload.due_date else None
+    assigned = 0
+    for employee_id in payload.employee_ids:
+        item = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == employee_id, Enrollment.module_id == payload.module_id))
+        if item:
+            item.status = "assigned"; item.due_date = due; item.assigned_by = user.id; item.assigned_at = datetime.utcnow()
+        else:
+            db.add(Enrollment(org_id=user.org_id, user_id=employee_id, module_id=payload.module_id, status="assigned", due_date=due, assigned_by=user.id, assigned_at=datetime.utcnow()))
+        assigned += 1
+    audit(db, user, "enrollment.assign", "training_module", payload.module_id, {"employee_count": assigned, "due_date": payload.due_date}); db.commit(); return {"assigned": assigned}
+
+
+# ---------------------------------------------------------------------------
+# Administrator: unresolved-question governance queue
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/feedback")
+def list_feedback(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), status_filter: str = Query(default="open", alias="status"), user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stmt = select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.status == status_filter).order_by(KnowledgeFeedback.created_at.desc())
+    rows, meta = paginate_query(stmt, db, page, page_size)
+    employees = {u.id: u.full_name for u in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
+    return {"items": [{**row_dict(item), "employee": employees.get(item.user_id, "Unknown")} for item in rows], **meta}
+
+
+@app.patch("/api/v1/admin/feedback/{feedback_id}")
+def resolve_feedback(feedback_id: str, payload: FeedbackResolve, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(KnowledgeFeedback).where(KnowledgeFeedback.id == feedback_id, KnowledgeFeedback.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Feedback item not found.")
+    if payload.status not in {"resolved", "dismissed", "in_review"}: raise HTTPException(400, {"detail": "Select a valid status.", "field": "status"})
+    if payload.status != "in_review" and not payload.resolution: raise HTTPException(400, {"detail": "Resolution notes are required.", "field": "resolution"})
+    item.status = payload.status
+    if payload.status != "in_review":
+        item.resolution = payload.resolution; item.resolved_by = user.id; item.resolved_at = datetime.utcnow()
+    db.flush(); audit(db, user, "feedback.resolve", "knowledge_feedback", item.id, {"status": payload.status}); db.commit(); return row_dict(item)
+
+
+# ---------------------------------------------------------------------------
+# Administrator: common-mistake register
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/mistakes")
+def admin_list_mistakes(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), q: str | None = None, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stmt = select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id)
+    if q: stmt = stmt.where(or_(MistakeRegisterEntry.title.ilike(f"%{q}%"), MistakeRegisterEntry.category.ilike(f"%{q}%")))
+    rows, meta = paginate_query(stmt.order_by(MistakeRegisterEntry.code), db, page, page_size)
+    return {"items": [row_dict(item) for item in rows], **meta}
+
+
+@app.post("/api/v1/admin/mistakes", status_code=201)
+def create_mistake(payload: MistakeCreate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    if db.scalar(select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.code == payload.code)):
+        raise HTTPException(409, "A register entry with this code already exists.")
+    item = MistakeRegisterEntry(org_id=user.org_id, is_seed=False, **payload.model_dump())
+    db.add(item); db.flush(); audit(db, user, "mistake.create", "mistake_register", item.id); db.commit(); return row_dict(item)
+
+
+@app.patch("/api/v1/admin/mistakes/{mistake_id}")
+def update_mistake(mistake_id: str, payload: MistakeUpdate, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(MistakeRegisterEntry).where(MistakeRegisterEntry.id == mistake_id, MistakeRegisterEntry.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Register entry not found.")
+    for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value)
+    db.flush(); audit(db, user, "mistake.update", "mistake_register", item.id); db.commit(); return row_dict(item)
+
+
+@app.delete("/api/v1/admin/mistakes/{mistake_id}")
+def delete_mistake(mistake_id: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(MistakeRegisterEntry).where(MistakeRegisterEntry.id == mistake_id, MistakeRegisterEntry.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Register entry not found.")
+    db.delete(item); audit(db, user, "mistake.delete", "mistake_register", mistake_id); db.commit(); return {"deleted": True}

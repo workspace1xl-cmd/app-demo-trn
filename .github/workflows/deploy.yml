@@ -1,0 +1,67 @@
+name: Deploy
+
+# Fully automated deploy on every push to main: apply pending Supabase
+# migrations, deploy the onework-api Edge Function, then verify health.
+# Vercel deploys itself through its native GitHub integration and needs no
+# step here unless VERCEL_TOKEN is also configured, in which case an explicit
+# production deploy is triggered as a safety net.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_ACCESS_TOKEN   personal access token, https://supabase.com/dashboard/account/tokens
+#   SUPABASE_PROJECT_REF    bnzcjjdhfsdedwljdmjl
+#   SUPABASE_DB_PASSWORD    the project's Postgres password
+# Optional:
+#   VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID   only if Vercel's own
+#     GitHub integration is not already connected to this repository.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  database-and-api:
+    name: Migrate database and deploy Edge Function
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Supabase CLI
+        run: npm install -g supabase
+
+      - name: Link project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}" -p "${{ secrets.SUPABASE_DB_PASSWORD }}"
+
+      - name: Apply pending migrations
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase db push --include-all -p "${{ secrets.SUPABASE_DB_PASSWORD }}"
+
+      - name: Deploy onework-api Edge Function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: supabase functions deploy onework-api --project-ref "${{ secrets.SUPABASE_PROJECT_REF }}" --no-verify-jwt
+
+      - name: Verify health
+        run: |
+          for attempt in 1 2 3 4 5; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "https://${{ secrets.SUPABASE_PROJECT_REF }}.supabase.co/functions/v1/onework-api/health")
+            if [ "$status" = "200" ]; then echo "Edge Function healthy."; exit 0; fi
+            echo "Attempt $attempt: got HTTP $status, retrying in 5s..."; sleep 5
+          done
+          echo "Edge Function did not report healthy after deploy."; exit 1
+
+  vercel-safety-net:
+    name: Trigger Vercel production deploy (only if VERCEL_TOKEN is set)
+    runs-on: ubuntu-latest
+    needs: database-and-api
+    if: ${{ secrets.VERCEL_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install -g vercel
+      - run: vercel pull --yes --environment=production --token "${{ secrets.VERCEL_TOKEN }}"
+      - run: vercel build --prod --token "${{ secrets.VERCEL_TOKEN }}"
+      - run: vercel deploy --prebuilt --prod --token "${{ secrets.VERCEL_TOKEN }}"

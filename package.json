@@ -10,7 +10,11 @@
     "build": "next build",
     "start": "next start",
     "test": "npm run build",
-    "lint": "eslint . --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern .next",
+    "db:link": "npx -y supabase@2 link --project-ref $SUPABASE_PROJECT_REF -p \"$SUPABASE_DB_PASSWORD\"",
+    "db:push": "npx -y supabase@2 db push --include-all -p \"$SUPABASE_DB_PASSWORD\"",
+    "deploy:api": "npx -y supabase@2 functions deploy onework-api --project-ref $SUPABASE_PROJECT_REF --no-verify-jwt",
+    "deploy:all": "npm run db:link && npm run db:push && npm run deploy:api"
   },
   "dependencies": {
     "next": "16.2.6",
