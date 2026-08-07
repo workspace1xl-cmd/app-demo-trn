@@ -85,7 +85,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     audit(db, user, "auth.login", "user", user.id); db.commit()
-    return TokenResponse(access_token=create_token(user.id, user.org_id, user.role), user={"id": user.id, "name": user.full_name, "email": user.email, "role": user.role, "org_id": user.org_id})
+    return TokenResponse(access_token=create_token(user.id, user.org_id, user.role), user={"id": user.id, "name": user.full_name, "email": user.email, "role": user.role, "org_id": user.org_id, "org_name": org.name})
 
 
 @app.post("/api/v1/organizations", response_model=TokenResponse, status_code=201)
@@ -115,12 +115,13 @@ def create_organization(payload: OrganizationSignup, db: Session = Depends(get_d
         db.add(QuizQuestion(org_id=org.id, module_id=module.id, prompt=f"Which action best demonstrates: {title}?", options=["Use the approved process and documented owner", "Ask informally and skip the record", "Use a personal channel", "Wait without escalating"], correct_index=0, explanation="Use the approved process, official channel and documented owner."))
 
     audit(db, admin, "organization.provision", "organization", org.id, {"name": org.name}); db.commit()
-    return TokenResponse(access_token=create_token(admin.id, org.id, admin.role), user={"id": admin.id, "name": admin.full_name, "email": admin.email, "role": admin.role, "org_id": org.id})
+    return TokenResponse(access_token=create_token(admin.id, org.id, admin.role), user={"id": admin.id, "name": admin.full_name, "email": admin.email, "role": admin.role, "org_id": org.id, "org_name": org.name})
 
 
 @app.get("/api/v1/me")
-def me(user: User = Depends(current_user)):
-    return {"id": user.id, "org_id": user.org_id, "name": user.full_name, "email": user.email, "role": user.role, "department_id": user.department_id}
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    org = db.get(Organization, user.org_id)
+    return {"id": user.id, "org_id": user.org_id, "org_name": org.name if org else None, "name": user.full_name, "email": user.email, "role": user.role, "department_id": user.department_id}
 
 
 @app.get("/api/v1/dashboard")

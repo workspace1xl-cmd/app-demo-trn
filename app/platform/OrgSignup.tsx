@@ -119,7 +119,6 @@ export default function OrgSignup({
         {errors.password ? <p className={styles.fieldError}>{errors.password}</p> : <small>At least 8 characters.</small>}
       </div>
       <button disabled={busy}>{busy ? "Creating your organisation…" : "Create organisation →"}</button>
-      <small>API: {API}</small>
     </form>
   );
 }
