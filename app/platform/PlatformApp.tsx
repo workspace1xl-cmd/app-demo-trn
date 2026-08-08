@@ -413,16 +413,23 @@ export default function WorkingPlatform() {
     return () => window.clearTimeout(timer);
   }, [session, view, reloadKey]);
 
-  async function login(event: FormEvent) {
-    event.preventDefault();
+  // `overrideEmail`/`overridePassword` let the one-click role buttons below
+  // log straight in — "choose Manager, you're in" — instead of filling the
+  // fields and making the person click Sign in as a second step.
+  // `event` is optional for the same reason: those buttons aren't a form
+  // submit, so there's nothing to preventDefault().
+  async function login(event?: FormEvent, overrideEmail?: string, overridePassword?: string) {
+    event?.preventDefault();
+    const loginEmail = overrideEmail ?? email;
+    const loginPassword = overridePassword ?? password;
     setBusy(true);
     setError("");
     try {
       const next = await request<Session>("/api/v1/auth/login", undefined, {
         method: "POST",
         body: JSON.stringify({
-          email,
-          password,
+          email: loginEmail,
+          password: loginPassword,
           organization: "example-organisation",
         }),
       });
@@ -573,24 +580,43 @@ export default function WorkingPlatform() {
           <button disabled={busy}>
             {busy ? "Connecting…" : "Sign in securely →"}
           </button>
+          <small className={styles.demoAccountsLabel}>Or sign in instantly as:</small>
           <div className={styles.demoAccounts}>
             <button
               type="button"
+              disabled={busy}
               onClick={() => {
                 setEmail("employee@company.com");
                 setPassword("Demo123!");
+                login(undefined, "employee@company.com", "Demo123!");
               }}
             >
-              Employee account
+              <span>◈</span>
+              Employee
             </button>
             <button
               type="button"
+              disabled={busy}
+              onClick={() => {
+                setEmail("manager@company.com");
+                setPassword("Manager123!");
+                login(undefined, "manager@company.com", "Manager123!");
+              }}
+            >
+              <span>◍</span>
+              Manager
+            </button>
+            <button
+              type="button"
+              disabled={busy}
               onClick={() => {
                 setEmail("admin@company.com");
                 setPassword("Admin123!");
+                login(undefined, "admin@company.com", "Admin123!");
               }}
             >
-              Admin account
+              <span>◉</span>
+              Admin
             </button>
           </div>
           <small>
