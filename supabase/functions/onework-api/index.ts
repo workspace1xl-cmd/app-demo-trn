@@ -266,10 +266,17 @@ Deno.serve(async (req) => {
       const teamDeptIds = Array.from(new Set(subtree.map((u: any) => u.department_id).filter(Boolean)));
       const teamDepartments = teamDeptIds.map((id) => ({ id, name: deptNameById.get(id) || "Unknown" })).sort((a, b) => a.name.localeCompare(b.name));
       const teamDeptNames = teamDepartments.map((d) => d.name);
-      const [{ data: enrollments }, { data: activities }] = await Promise.all([
+      const [{ data: enrollments }, { data: activities }, { data: recentNudges }] = await Promise.all([
         teamIds.length ? supabase.from("enrollments").select("user_id,status,due_date").eq("org_id", user.org_id).in("user_id", teamIds) : Promise.resolve({ data: [] as { user_id: string; status: string; due_date: string | null }[] }),
         teamDeptNames.length ? supabase.from("activities").select("id,name,department,responsible_role,current_person,backup_person,contact_details,sla,escalation_level_1,escalation_level_2,sop_link,training_module_link,status").eq("org_id", user.org_id).in("department", teamDeptNames) : Promise.resolve({ data: [] as unknown[] }),
+        // BUILD PROMPT v5 item B2: "nudged Nd ago" state so a manager can
+        // see a nudge already went out instead of guessing whether to
+        // send another — reuses notification_outbox (kind='learning_reminder')
+        // as the record of it, not a separate nudge-log table.
+        teamIds.length ? supabase.from("notification_outbox").select("user_id,created_at").eq("org_id", user.org_id).in("user_id", teamIds).eq("kind", "learning_reminder").order("created_at", { ascending: false }) : Promise.resolve({ data: [] as { user_id: string; created_at: string }[] }),
       ]);
+      const lastNudgedByUser = new Map<string, string>();
+      for (const n of recentNudges || []) if (!lastNudgedByUser.has(n.user_id)) lastNudgedByUser.set(n.user_id, n.created_at);
       const today = new Date().toISOString().slice(0, 10);
       const total = moduleCount || 0;
       const members = subtree.map((member: any) => {
@@ -277,7 +284,7 @@ Deno.serve(async (req) => {
         const completed = rows.filter((e) => e.status === "completed").length;
         const overdue = rows.filter((e) => e.due_date && e.due_date < today && e.status !== "completed").length;
         const percent = total ? Math.round((completed / total) * 100) : 0;
-        return { id: member.id, name: member.full_name, email: member.email, department: deptNameById.get(member.department_id) || null, training_percent: percent, completed, total, overdue_count: overdue };
+        return { id: member.id, name: member.full_name, email: member.email, department: deptNameById.get(member.department_id) || null, training_percent: percent, completed, total, overdue_count: overdue, last_nudged_at: lastNudgedByUser.get(member.id) || null };
       });
       const teamTotal = members.reduce((sum, m) => sum + m.total, 0), teamCompleted = members.reduce((sum, m) => sum + m.completed, 0);
       const teamReadiness = scoreFromComponents([{ key: "training", label: "Team training completion", percent: teamTotal ? Math.round((teamCompleted / teamTotal) * 100) : 0 }]);
@@ -294,11 +301,54 @@ Deno.serve(async (req) => {
       });
     }
 
+    // BUILD PROMPT v5 item B2: "nudge from anywhere" — a manager (or
+    // admin) sends an immediate reminder to someone overdue, instead of
+    // waiting for the nightly cron to eventually notice. Scoped to the
+    // caller's real reports-to subtree (walked the same way the
+    // dashboard above does — a manager can't nudge a stranger), and
+    // capped at one nudge per person per 24h so it can't be used to spam.
+    const nudgeMatch = path.match(/^\/api\/v1\/manager\/nudge\/([^/]+)$/);
+    if (nudgeMatch && req.method === "POST") {
+      if (user.role !== "manager" && !isAdmin) return json({ detail: "Manager permission required." }, 403);
+      const targetId = nudgeMatch[1];
+      if (!isAdmin) {
+        const { data: allUsers } = await supabase.from("app_users").select("id,manager_id").eq("org_id", user.org_id).eq("is_active", true);
+        const directReportsOf = new Map<string, string[]>();
+        for (const u of allUsers || []) { if (!u.manager_id) continue; const list = directReportsOf.get(u.manager_id) || []; list.push(u.id); directReportsOf.set(u.manager_id, list); }
+        const seen = new Set<string>([user.id]); let frontier = [user.id]; let inSubtree = false;
+        for (let depth = 0; depth < 10 && frontier.length && !inSubtree; depth++) {
+          const next: string[] = [];
+          for (const managerId of frontier) for (const reportId of directReportsOf.get(managerId) || []) { if (reportId === targetId) inSubtree = true; if (!seen.has(reportId)) { seen.add(reportId); next.push(reportId); } }
+          frontier = next;
+        }
+        if (!inSubtree) return json({ detail: "This person doesn't report to you." }, 403);
+      }
+      const { data: recent } = await supabase.from("notification_outbox").select("id,created_at").eq("org_id", user.org_id).eq("user_id", targetId).eq("kind", "learning_reminder").gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()).order("created_at", { ascending: false }).limit(1);
+      if (recent && recent.length) return json({ ok: true, already_nudged: true, last_nudged_at: recent[0].created_at });
+      const today = new Date().toISOString().slice(0, 10);
+      const { data: overdueEnrollments } = await supabase.from("enrollments").select("module_id,status,training_modules(title,code)").eq("org_id", user.org_id).eq("user_id", targetId).lt("due_date", today).neq("status", "completed");
+      if (!overdueEnrollments || !overdueEnrollments.length) return json({ detail: "No overdue training to nudge about." }, 409);
+      const rows = overdueEnrollments.map((e: any) => ({ org_id: user.org_id, user_id: targetId, kind: "learning_reminder", subject: "Continue your required OneWork training", payload: { module_id: e.module_id, module_code: e.training_modules?.code, module_title: e.training_modules?.title, status: e.status, nudged_by: user.id } }));
+      const { error } = await supabase.from("notification_outbox").insert(rows);
+      if (error) throw error;
+      await audit(user, "manager.nudge", "app_user", targetId, { count: rows.length });
+      return json({ ok: true, already_nudged: false, nudged_count: rows.length });
+    }
+
     // notification_outbox is populated nightly by public.enqueue_onework_reminders()
     // (pg_cron, added for the n8n email pipeline) — read_at is purely in-app
     // "seen in the bell dropdown" state, kept separate from status/sent_at
     // which track actual email delivery.
+    //
+    // Also called lazily here, mirroring the FastAPI mirror's
+    // _enqueue_reminders (which never had a scheduler to rely on) —
+    // without this, data that starts qualifying for a reminder AFTER
+    // today's 2:30am cron run stays invisible in the bell until
+    // tomorrow, a real gap found while re-seeding demo data mid-day.
+    // The function's own per-day dedup guards make this safe to call on
+    // every notifications read, not just once.
     if (path === "/api/v1/notifications" && req.method === "GET") {
+      await supabase.rpc("enqueue_onework_reminders");
       const { data: rows } = await supabase.from("notification_outbox").select("id,kind,subject,payload,created_at,read_at").eq("org_id", user.org_id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(30);
       const notifications = rows || [];
       return json({ notifications, unread_count: notifications.filter((n) => !n.read_at).length });
@@ -619,6 +669,69 @@ Deno.serve(async (req) => {
       if (modules?.length) await supabase.from("enrollments").insert(modules.map((m) => ({ org_id: user.org_id, user_id: created.id, module_id: m.id, status: m.sequence === 1 ? "assigned" : "locked", assigned_by: user.id, assigned_at: new Date().toISOString() })));
       await audit(user, "employee.create", "app_user", created.id, { role: created.role }); return json(created, 201);
     }
+    // BUILD PROMPT v5 item B3: bulk CSV import — admins will not
+    // hand-create 200 employees one FormModal at a time. Column mapping
+    // happens client-side (the browser already knows the CSV headers);
+    // this route takes already-mapped rows and does the validation +
+    // creation, returning a per-row report so a partial import (some
+    // rows good, some bad) is visible rather than all-or-nothing.
+    // Passwords are randomly generated — there's no invite-email
+    // pipeline yet (deliberately out of scope, same as SSO), so a
+    // freshly-imported account needs an admin-issued password reset
+    // before that person can sign in. That limitation is surfaced in the
+    // import UI copy, not hidden.
+    if (path === "/api/v1/admin/employees/import" && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      const rows: any[] = Array.isArray(body.rows) ? body.rows : [];
+      if (!rows.length) return json({ detail: "No rows to import." }, 400);
+      if (rows.length > 500) return json({ detail: "Import is capped at 500 rows at a time." }, 400);
+      const [{ data: departments }, { data: existingUsers }] = await Promise.all([
+        supabase.from("departments").select("id,name").eq("org_id", user.org_id),
+        supabase.from("app_users").select("id,email,full_name").eq("org_id", user.org_id),
+      ]);
+      const deptByLowerName = new Map((departments || []).map((d) => [d.name.toLowerCase(), d.id]));
+      const userByLowerEmail = new Map((existingUsers || []).map((u) => [u.email.toLowerCase(), u.id]));
+      const created: unknown[] = []; const errors: { row: number; email: string; message: string }[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i]; const rowNum = i + 1;
+        const fullName = String(r.full_name || "").trim();
+        const email = String(r.email || "").trim().toLowerCase();
+        const role = String(r.role || "employee").trim().toLowerCase() || "employee";
+        const deptName = String(r.department || "").trim();
+        const managerEmail = String(r.manager_email || "").trim().toLowerCase();
+        if (!fullName) { errors.push({ row: rowNum, email, message: "Full Name is required." }); continue; }
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { errors.push({ row: rowNum, email, message: "Invalid Email ID." }); continue; }
+        if (userByLowerEmail.has(email)) { errors.push({ row: rowNum, email, message: "An employee with this Email ID already exists." }); continue; }
+        if (!["employee", "manager", "content_admin", "admin"].includes(role)) { errors.push({ row: rowNum, email, message: `Unknown role "${role}".` }); continue; }
+        let departmentId: string | null = null;
+        if (deptName) {
+          departmentId = deptByLowerName.get(deptName.toLowerCase()) || null;
+          if (!departmentId) { errors.push({ row: rowNum, email, message: `Unknown department "${deptName}".` }); continue; }
+        }
+        let managerId: string | null = null;
+        if (managerEmail) {
+          managerId = userByLowerEmail.get(managerEmail) || null;
+          if (!managerId) { errors.push({ row: rowNum, email, message: `Manager email "${managerEmail}" not found — import the manager first, or leave this blank and set it afterwards.` }); continue; }
+        }
+        const randomPassword = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        const { data: newUser, error: createError } = await supabase.rpc("admin_create_user", { p_org_id: user.org_id, p_department_id: departmentId, p_email: email, p_full_name: fullName, p_role: role, p_password: randomPassword });
+        const row = newUser?.[0];
+        if (createError || !row) { errors.push({ row: rowNum, email, message: "Could not create this employee." }); continue; }
+        if (managerId) await supabase.from("app_users").update({ manager_id: managerId }).eq("id", row.id).eq("org_id", user.org_id);
+        userByLowerEmail.set(email, row.id); // so a later row can reference this one as its manager
+        created.push(row);
+      }
+      if (created.length) {
+        const { data: modules } = await supabase.from("training_modules").select("id,sequence").eq("org_id", user.org_id).order("sequence");
+        if (modules?.length) {
+          const enrollmentRows = (created as { id: string }[]).flatMap((u) => modules.map((m) => ({ org_id: user.org_id, user_id: u.id, module_id: m.id, status: m.sequence === 1 ? "assigned" : "locked", assigned_by: user.id, assigned_at: new Date().toISOString() })));
+          await supabase.from("enrollments").insert(enrollmentRows);
+        }
+        await audit(user, "employee.bulk_import", "app_user", undefined, { created: created.length, errors: errors.length });
+      }
+      return json({ created: created.length, errors });
+    }
     const employeeMatch = path.match(/^\/api\/v1\/admin\/employees\/([^/]+)$/);
     if (employeeMatch && req.method === "PATCH") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
@@ -659,6 +772,35 @@ Deno.serve(async (req) => {
       const { data, error } = await supabase.from("activities").insert({ org_id: user.org_id, name: body.name.trim(), department: body.department.trim(), responsible_role: body.responsible_role.trim(), current_person: body.current_person?.trim() || "Organisation to confirm", backup_person: body.backup_person?.trim() || "Department backup", contact_details: body.contact_details.trim(), sla: body.sla.trim(), escalation_level_1: body.escalation_level_1.trim(), escalation_level_2: body.escalation_level_2.trim(), sop_link: body.sop_link || null, training_module_link: body.training_module_link || null }).select().single();
       if (error) return json({ detail: "An activity with this name already exists." }, 409);
       await audit(user, "activity.create", "activity", data.id); return json(data, 201);
+    }
+    // BUILD PROMPT v5 item B3: bulk CSV import for the Responsibility
+    // Matrix — same shape as the employees import above (client-mapped
+    // rows in, per-row created/error report out). "activity name already
+    // exists" is a real per-row failure mode (unique constraint), not
+    // swallowed into a generic 500.
+    if (path === "/api/v1/admin/activities/import" && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      const rows: any[] = Array.isArray(body.rows) ? body.rows : [];
+      if (!rows.length) return json({ detail: "No rows to import." }, 400);
+      if (rows.length > 500) return json({ detail: "Import is capped at 500 rows at a time." }, 400);
+      const required = ["name", "department", "responsible_role", "contact_details", "sla", "escalation_level_1", "escalation_level_2"];
+      const created: unknown[] = []; const errors: { row: number; name: string; message: string }[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i]; const rowNum = i + 1; const name = String(r.name || "").trim();
+        const missing = required.find((f) => !String(r[f] || "").trim());
+        if (missing) { errors.push({ row: rowNum, name, message: `${missing.replace(/_/g, " ")} is required.` }); continue; }
+        const { data, error } = await supabase.from("activities").insert({
+          org_id: user.org_id, name, department: String(r.department).trim(), responsible_role: String(r.responsible_role).trim(),
+          current_person: String(r.current_person || "").trim() || "Organisation to confirm", backup_person: String(r.backup_person || "").trim() || "Department backup",
+          contact_details: String(r.contact_details).trim(), sla: String(r.sla).trim(), escalation_level_1: String(r.escalation_level_1).trim(), escalation_level_2: String(r.escalation_level_2).trim(),
+          sop_link: r.sop_link || null, training_module_link: r.training_module_link || null,
+        }).select().single();
+        if (error || !data) { errors.push({ row: rowNum, name, message: "An activity with this name already exists." }); continue; }
+        created.push(data);
+      }
+      if (created.length) await audit(user, "activity.bulk_import", "activity", undefined, { created: created.length, errors: errors.length });
+      return json({ created: created.length, errors });
     }
     const activityMatch = path.match(/^\/api\/v1\/admin\/activities\/([^/]+)$/);
     if (activityMatch && req.method === "PATCH") {

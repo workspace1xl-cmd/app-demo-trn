@@ -14,6 +14,7 @@ export type GraphActivity = {
   department: string;
   responsible_role: string;
   current_person: string;
+  backup_person: string;
   contact_details: string;
   sla: string;
   escalation_level_1: string;

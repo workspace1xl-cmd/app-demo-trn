@@ -1,5 +1,6 @@
 import math
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
@@ -286,13 +287,23 @@ def manager_dashboard(user: User = Depends(current_user), db: Session = Depends(
     team_dept_names = [d["name"] for d in team_departments]
     total_modules = db.scalar(select(func.count()).select_from(TrainingModule).where(TrainingModule.org_id == user.org_id, TrainingModule.status == "published")) or 0
     today = date.today()
+    # BUILD PROMPT v5 item B2: last nudge time per member, reusing
+    # notification_outbox (kind='learning_reminder') as the record rather
+    # than a separate nudge-log table.
+    subtree_ids = [m.id for m in subtree]
+    last_nudged_by_user: dict[str, datetime] = {}
+    if subtree_ids:
+        nudge_rows = db.scalars(select(Notification).where(Notification.org_id == user.org_id, Notification.user_id.in_(subtree_ids), Notification.kind == "learning_reminder").order_by(Notification.created_at.desc())).all()
+        for n in nudge_rows:
+            last_nudged_by_user.setdefault(n.user_id, n.created_at)
     members = []
     for member in subtree:
         rows = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == member.id)).all()
         completed = sum(1 for r in rows if r.status == "completed")
         overdue = sum(1 for r in rows if r.due_date and r.due_date < today and r.status != "completed")
         percent = _round_half_up(completed / total_modules * 100) if total_modules else 0
-        members.append({"id": member.id, "name": member.full_name, "email": member.email, "department": dept_by_id.get(member.department_id), "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue})
+        last_nudged = last_nudged_by_user.get(member.id)
+        members.append({"id": member.id, "name": member.full_name, "email": member.email, "department": dept_by_id.get(member.department_id), "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue, "last_nudged_at": last_nudged.isoformat() if last_nudged else None})
     team_total = sum(m["total"] for m in members)
     team_completed = sum(m["completed"] for m in members)
     team_percent = _round_half_up(team_completed / team_total * 100) if team_total else 0
@@ -306,6 +317,35 @@ def manager_dashboard(user: User = Depends(current_user), db: Session = Depends(
         "activities": [activity_dict(a) for a in activities],
         "has_reports": len(members) > 0,
     }
+
+
+# BUILD PROMPT v5 item B2 — mirrors the Edge Function's nudge route:
+# manager (or admin) sends an immediate reminder instead of waiting for
+# the nightly enqueue, scoped to the caller's real reports-to subtree,
+# capped at one per person per 24h.
+@app.post("/api/v1/manager/nudge/{target_id}")
+def nudge_employee(target_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.role not in ("manager", "admin"):
+        raise HTTPException(403, "Manager permission required.")
+    if user.role != "admin":
+        subtree_ids = {m.id for m in _team_subtree(db, user.org_id, user.id)}
+        if target_id not in subtree_ids:
+            raise HTTPException(403, "This person doesn't report to you.")
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    recent = db.scalar(select(Notification).where(Notification.org_id == user.org_id, Notification.user_id == target_id, Notification.kind == "learning_reminder", Notification.created_at >= cutoff).order_by(Notification.created_at.desc()))
+    if recent:
+        return {"ok": True, "already_nudged": True, "last_nudged_at": recent.created_at.isoformat()}
+    today = date.today()
+    overdue = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == target_id, Enrollment.due_date.isnot(None), Enrollment.due_date < today, Enrollment.status != "completed")).all()
+    if not overdue:
+        raise HTTPException(409, "No overdue training to nudge about.")
+    modules_by_id = {m.id: m for m in db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id)).all()}
+    for e in overdue:
+        module = modules_by_id.get(e.module_id)
+        db.add(Notification(org_id=user.org_id, user_id=target_id, kind="learning_reminder", subject="Continue your required OneWork training", payload={"module_id": e.module_id, "module_code": module.code if module else None, "module_title": module.title if module else None, "status": e.status, "nudged_by": user.id}))
+    audit(db, user, "manager.nudge", "app_user", target_id, {"count": len(overdue)})
+    db.commit()
+    return {"ok": True, "already_nudged": False, "nudged_count": len(overdue)}
 
 
 def _notification_dict(item: Notification) -> dict:
@@ -361,6 +401,41 @@ def create_activity(payload: ActivityCreate, user: User = Depends(admin_user), d
     if db.scalar(select(Activity).where(Activity.org_id == user.org_id, Activity.name == payload.name)):
         raise HTTPException(409, "An activity with this name already exists.")
     item = Activity(org_id=user.org_id, **payload.model_dump()); db.add(item); db.flush(); audit(db, user, "activity.create", "activity", item.id); db.commit(); return activity_dict(item)
+
+
+# BUILD PROMPT v5 item B3 — mirrors the Edge Function's activities/import:
+# client-mapped CSV rows in, per-row created/error report out.
+_ACTIVITY_IMPORT_REQUIRED = ["name", "department", "responsible_role", "contact_details", "sla", "escalation_level_1", "escalation_level_2"]
+
+
+@app.post("/api/v1/admin/activities/import")
+def import_activities(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rows = payload.get("rows") or []
+    if not rows:
+        raise HTTPException(400, "No rows to import.")
+    if len(rows) > 500:
+        raise HTTPException(400, "Import is capped at 500 rows at a time.")
+    created, errors = [], []
+    for i, r in enumerate(rows):
+        row_num, name = i + 1, str(r.get("name") or "").strip()
+        missing = next((f for f in _ACTIVITY_IMPORT_REQUIRED if not str(r.get(f) or "").strip()), None)
+        if missing:
+            errors.append({"row": row_num, "name": name, "message": f"{missing.replace('_', ' ')} is required."})
+            continue
+        if db.scalar(select(Activity).where(Activity.org_id == user.org_id, Activity.name == name)):
+            errors.append({"row": row_num, "name": name, "message": "An activity with this name already exists."})
+            continue
+        item = Activity(
+            org_id=user.org_id, name=name, department=str(r["department"]).strip(), responsible_role=str(r["responsible_role"]).strip(),
+            current_person=str(r.get("current_person") or "").strip() or "Organisation to confirm", backup_person=str(r.get("backup_person") or "").strip() or "Department backup",
+            contact_details=str(r["contact_details"]).strip(), sla=str(r["sla"]).strip(), escalation_level_1=str(r["escalation_level_1"]).strip(), escalation_level_2=str(r["escalation_level_2"]).strip(),
+            sop_link=r.get("sop_link") or None, training_module_link=r.get("training_module_link") or None,
+        )
+        db.add(item); db.flush(); created.append(item)
+    if created:
+        audit(db, user, "activity.bulk_import", "activity", None, {"created": len(created), "errors": len(errors)})
+    db.commit()
+    return {"created": len(created), "errors": errors}
 
 
 @app.patch("/api/v1/admin/activities/{activity_id}")
@@ -680,6 +755,58 @@ def create_employee(payload: EmployeeCreate, user: User = Depends(admin_user), d
     for module in modules:
         db.add(Enrollment(org_id=user.org_id, user_id=item.id, module_id=module.id, status="assigned" if module.sequence == 1 else "locked", assigned_by=user.id, assigned_at=datetime.utcnow()))
     audit(db, user, "employee.create", "app_user", item.id, {"role": item.role}); db.commit(); return employee_dict(item)
+
+
+# BUILD PROMPT v5 item B3 — mirrors the Edge Function's employees/import.
+# Passwords are randomly generated (no invite-email pipeline exists yet,
+# same deliberate gap as the Edge Function's version) — an imported
+# account needs an admin-issued password reset before first sign-in.
+@app.post("/api/v1/admin/employees/import")
+def import_employees(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rows = payload.get("rows") or []
+    if not rows:
+        raise HTTPException(400, "No rows to import.")
+    if len(rows) > 500:
+        raise HTTPException(400, "Import is capped at 500 rows at a time.")
+    departments = {d.name.lower(): d.id for d in db.scalars(select(Department).where(Department.org_id == user.org_id)).all()}
+    users_by_email = {u.email.lower(): u.id for u in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
+    modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id).order_by(TrainingModule.sequence)).all()
+    created, errors = [], []
+    for i, r in enumerate(rows):
+        row_num = i + 1
+        full_name = str(r.get("full_name") or "").strip()
+        email = str(r.get("email") or "").strip().lower()
+        role = (str(r.get("role") or "employee").strip().lower()) or "employee"
+        dept_name = str(r.get("department") or "").strip()
+        manager_email = str(r.get("manager_email") or "").strip().lower()
+        if not full_name:
+            errors.append({"row": row_num, "email": email, "message": "Full Name is required."}); continue
+        if not email or "@" not in email or "." not in email.split("@")[-1]:
+            errors.append({"row": row_num, "email": email, "message": "Invalid Email ID."}); continue
+        if email in users_by_email:
+            errors.append({"row": row_num, "email": email, "message": "An employee with this Email ID already exists."}); continue
+        if role not in {"employee", "manager", "content_admin", "admin"}:
+            errors.append({"row": row_num, "email": email, "message": f'Unknown role "{role}".'}); continue
+        department_id = None
+        if dept_name:
+            department_id = departments.get(dept_name.lower())
+            if not department_id:
+                errors.append({"row": row_num, "email": email, "message": f'Unknown department "{dept_name}".'}); continue
+        manager_id = None
+        if manager_email:
+            manager_id = users_by_email.get(manager_email)
+            if not manager_id:
+                errors.append({"row": row_num, "email": email, "message": f'Manager email "{manager_email}" not found — import the manager first, or leave this blank and set it afterwards.'}); continue
+        item = User(org_id=user.org_id, department_id=department_id, manager_id=manager_id, email=email, full_name=full_name, role=role, password_hash=hash_password(secrets.token_urlsafe(12)))
+        db.add(item); db.flush()
+        for module in modules:
+            db.add(Enrollment(org_id=user.org_id, user_id=item.id, module_id=module.id, status="assigned" if module.sequence == 1 else "locked", assigned_by=user.id, assigned_at=datetime.utcnow()))
+        users_by_email[email] = item.id  # so a later row can reference this one as its manager
+        created.append(item)
+    if created:
+        audit(db, user, "employee.bulk_import", "app_user", None, {"created": len(created), "errors": len(errors)})
+    db.commit()
+    return {"created": len(created), "errors": errors}
 
 
 @app.patch("/api/v1/admin/employees/{employee_id}")
