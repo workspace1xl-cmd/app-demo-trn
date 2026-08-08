@@ -115,8 +115,14 @@ function renderMarkdownLite(text: string) {
 type Notification = { id: string; kind: string; subject: string; payload: Record<string, unknown>; created_at: string; read_at: string | null };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
 type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; open_feedback: number; readiness: Readiness };
-type ManagerMember = { id: string; name: string; email: string; training_percent: number; completed: number; total: number; overdue_count: number };
-type ManagerData = { department: { id: string; name: string } | null; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; activities: Activity[] };
+type ManagerMember = { id: string; name: string; email: string; department: string | null; training_percent: number; completed: number; total: number; overdue_count: number };
+// BUILD PROMPT v5 item A3: `department` (singular) replaced with
+// `departments` (the set actually represented across the real
+// manager_id-derived team, which can span more than one) and
+// `has_reports` distinguishes "zero direct/rolled-up reports" — a real,
+// valid org state while manager_id assignment is still rolling out — from
+// a loading/error state.
+type ManagerData = { departments: { id: string; name: string }[]; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; activities: Activity[]; has_reports: boolean };
 type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | AdminData | ManagerData | null;
 
 export async function request<T = PlatformData>(
@@ -431,13 +437,15 @@ export default function WorkingPlatform() {
           </h1>
           <p>
             Ask any question and get a verified answer, complete your
-            training, and always know exactly who owns what — all in one
-            place.
+            training, and see exactly who owns what — as a live graph, not
+            a static chart — with a transparent readiness score for every
+            person, team and the org as a whole.
           </p>
           <div className={styles.liveStack}>
             <b>● Verified answers</b>
-            <b>● Guided training</b>
-            <b>● Real certificates</b>
+            <b>● Live ownership graph</b>
+            <b>● Readiness score</b>
+            <b>● Manager &amp; exec views</b>
           </div>
         </section>
         <form className={styles.loginCard} onSubmit={login}>
@@ -962,23 +970,32 @@ export default function WorkingPlatform() {
               <section className={styles.orgReadiness}>
                 <ReadinessRing readiness={managerData.team_readiness} caption="team readiness" />
                 <div>
-                  <b>{managerData.department?.name || "Your team"}</b>
+                  <b>Your team</b>
                   <p>
-                    {managerData.members.length} people ·{" "}
+                    {managerData.members.length} {managerData.members.length === 1 ? "person" : "people"}
+                    {managerData.departments.length > 0 && ` across ${managerData.departments.map((d) => d.name).join(", ")}`}
+                    {" · "}
                     {managerData.overdue_total > 0
                       ? `${managerData.overdue_total} overdue training item${managerData.overdue_total === 1 ? "" : "s"}`
                       : "nothing overdue"}
-                    . Reporting line is by department — reassign an employee&apos;s
-                    department in Admin → Employees to move them onto or off a team.
+                    . This is who actually reports to you (directly or through another
+                    manager), not everyone in your department.
                   </p>
                 </div>
               </section>
+              {!managerData.has_reports && (
+                <div className={styles.error}>
+                  Nobody reports to you yet. An admin can set this in{" "}
+                  <b>Admin → Employees → edit an employee → Reports To</b>.
+                </div>
+              )}
               <div className={styles.dataTable}>
                 <table>
                   <thead>
                     <tr>
                       <th>Name</th>
                       <th>Email ID</th>
+                      <th>Department</th>
                       <th>Training</th>
                       <th>Overdue</th>
                     </tr>
@@ -988,6 +1005,7 @@ export default function WorkingPlatform() {
                       <tr key={m.id}>
                         <td>{m.name}</td>
                         <td>{m.email}</td>
+                        <td>{m.department || "—"}</td>
                         <td>
                           {m.completed}/{m.total} ({m.training_percent}%)
                         </td>
@@ -1001,8 +1019,8 @@ export default function WorkingPlatform() {
                     ))}
                     {managerData.members.length === 0 && (
                       <tr>
-                        <td colSpan={4} className={styles.noRecords}>
-                          No records found. Nobody is assigned to this department yet.
+                        <td colSpan={5} className={styles.noRecords}>
+                          No records found.
                         </td>
                       </tr>
                     )}

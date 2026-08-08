@@ -2,13 +2,14 @@
 
 ## Management demonstration order
 
-1. Open the [management blueprint](https://onework-employee-os-demo.vercel.app) and use its navigation to show the complete scope: plan, curriculum, mistakes, responsibility matrix, SOPs, architecture, prototype, assessments, roadmap and scale.
+1. Open the [management blueprint](https://onework-employee-os-demo.vercel.app) and use its navigation to show the complete scope: plan, curriculum, mistakes, responsibility matrix, architecture, prototype, assessments, roadmap and scale.
 2. Select **Open working platform**.
-3. Sign in as the employee and show the live dashboard.
-4. Ask “How do I request leave?” to demonstrate verified organisational knowledge.
-5. Open **Who does what** and **SOP repository** to show operational ownership.
+3. Sign in as the employee and show the live dashboard, including the readiness score breakdown.
+4. Ask “Who do I ask about leave?” via the floating AI assistant or Knowledge search to demonstrate verified organisational knowledge, grounded in the RACI data — not a document, a named owner.
+5. Open **Who does what** and **Responsibility graph** to show operational ownership; SOP documents themselves live in SOPGalaxy — each activity carries only a link out to it.
 6. Open **My learning**, complete the active assessment and show the generated certificate.
-7. Sign in as administrator and show organisation analytics.
+7. Sign in as manager and show **My team**: team readiness, per-member training/overdue, team-scoped responsibility graph.
+8. Sign in as administrator and show organisation analytics, then **Exec View** for the readiness trend and department comparison.
 
 ## Delivered scope
 
@@ -17,8 +18,9 @@
 | Detailed project plan | Management blueprint → Delivery plan |
 | Complete training curriculum | Blueprint → Curriculum; live 22-module learning path |
 | Common employee mistakes | Blueprint → Mistake register |
-| Responsibility matrix | Blueprint and live **Who does what** |
-| Initial SOP repository | Blueprint and live **SOP repository** |
+| Responsibility matrix + live ownership graph | Blueprint and live **Who does what** / **Responsibility graph** |
+| SOP linkage | Each activity links out to SOPGalaxy; no SOP content or workflow is owned here |
+| Manager and executive views | Live **My team** (manager) and **Exec View** (admin) |
 | Architecture and workflow | Blueprint → Architecture; `docs/ARCHITECTURE.md` |
 | UI/UX prototype | `/` and `/platform`; reusable UI branch |
 | Training and assessment structure | Live learning, quiz attempts and certificates |

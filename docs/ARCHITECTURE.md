@@ -40,7 +40,10 @@ Employee / Manager / Administrator
 3. Each protected request resolves that token to an active user and organisation.
 4. Every database query includes the same `org_id`; administrator routes also check role.
 5. Mutating actions create an audit event.
-6. Knowledge search retrieves approved responsibility, SOP and learning records first.
+6. Knowledge search retrieves approved responsibility and learning records first (keyword
+   matching today — see the README's Known Limitations for the pgvector semantic-search gap).
+   SOP *documents* themselves are never queried here; they live in SOPGalaxy, and the only
+   SOP-related data this API touches is the plain `sop_link` URL on an activity record.
 7. If `ANTHROPIC_API_KEY` exists, only the retrieved evidence is sent to Claude for synthesis. A deterministic answer remains available if Claude is unavailable.
 
 ## Data domains
@@ -48,8 +51,9 @@ Employee / Manager / Administrator
 | Domain | Primary records | Controls |
 | --- | --- | --- |
 | Identity | organisations, departments, users, sessions | tenant keys, expiring sessions, role checks |
-| Ownership | activities | owner, backup, channel, SLA, escalation, linked SOP/training |
-| Knowledge | SOPs, knowledge chunks, feedback | version, approver, review date, unresolved queue |
+| Ownership | activities | owner, backup, channel, SLA, escalation, linked training, external SOP link |
+| Knowledge | knowledge chunks, feedback | unresolved queue (SOP documents are managed entirely in SOPGalaxy, not here) |
+| Readiness | readiness_snapshots, notification_outbox | daily org-readiness history, in-app + email reminder queue |
 | Learning | modules, questions, enrollments, attempts | ordered pathway, pass threshold, evidence |
 | Certification | certificates | unique number, issue date, expiry date |
 | Governance | audit events | actor, action, entity, timestamp, details |

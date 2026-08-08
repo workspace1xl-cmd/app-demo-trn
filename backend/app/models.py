@@ -40,6 +40,10 @@ class User(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
     department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
+    # BUILD PROMPT v5 item A3: the real reports-to relationship, mirroring
+    # Supabase's app_users.manager_id — department is not a reporting
+    # line. Nullable: unassigned reports are a real state, not an error.
+    manager_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     email: Mapped[str] = mapped_column(String(255), index=True)
     full_name: Mapped[str] = mapped_column(String(160))
     role: Mapped[str] = mapped_column(String(30), default="employee")
