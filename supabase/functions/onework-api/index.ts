@@ -465,13 +465,21 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     if (path === "/api/v1/admin/exec" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const [{ data: snapshots }, { data: departments }, { data: deptUsers }, { data: deptEnrollments }, { data: activities }] = await Promise.all([
-        supabase.from("readiness_snapshots").select("score,captured_at").eq("org_id", user.org_id).order("captured_at", { ascending: true }).limit(30),
+      const [{ data: snapshotsDesc }, { data: departments }, { data: deptUsers }, { data: deptEnrollments }, { data: activities }] = await Promise.all([
+        // Most recent 30 days: order DESCENDING before the limit (an
+        // ascending order + limit, the original version of this query,
+        // took the OLDEST 30 rows instead — invisible while there were
+        // only 1-2 snapshot rows total, but very visible once real
+        // history existed: the trend chart silently stopped in June
+        // instead of showing up to today). Reversed back to ascending
+        // afterwards since that's the order a left-to-right chart needs.
+        supabase.from("readiness_snapshots").select("score,captured_at").eq("org_id", user.org_id).order("captured_at", { ascending: false }).limit(30),
         supabase.from("departments").select("id,name").eq("org_id", user.org_id).order("name"),
         supabase.from("app_users").select("id,department_id").eq("org_id", user.org_id),
         supabase.from("enrollments").select("user_id,status").eq("org_id", user.org_id),
         supabase.from("activities").select("department,current_person").eq("org_id", user.org_id),
       ]);
+      const snapshots = (snapshotsDesc || []).slice().reverse();
       const usersByDept = new Map<string, string[]>();
       for (const u of deptUsers || []) { if (!u.department_id) continue; const list = usersByDept.get(u.department_id) || []; list.push(u.id); usersByDept.set(u.department_id, list); }
       const enrollmentsByUser = new Map<string, { status: string }[]>();
