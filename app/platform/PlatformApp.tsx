@@ -115,7 +115,7 @@ function renderMarkdownLite(text: string) {
 type Notification = { id: string; kind: string; subject: string; payload: Record<string, unknown>; created_at: string; read_at: string | null };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
 type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; open_feedback: number; readiness: Readiness };
-type ManagerMember = { id: string; name: string; email: string; department: string | null; training_percent: number; completed: number; total: number; overdue_count: number };
+type ManagerMember = { id: string; name: string; email: string; department: string | null; training_percent: number; completed: number; total: number; overdue_count: number; last_nudged_at: string | null };
 // BUILD PROMPT v5 item A3: `department` (singular) replaced with
 // `departments` (the set actually represented across the real
 // manager_id-derived team, which can span more than one) and
@@ -282,6 +282,84 @@ export default function WorkingPlatform() {
   }
   const [graphDeptFilter, setGraphDeptFilter] = useState("");
   const [graphSelection, setGraphSelection] = useState<{ label: string; kind: string; activities: GraphActivity[] } | null>(null);
+  // BUILD PROMPT v5 item B1: inline RACI resolution — turns "here's a gap"
+  // into "fix it here", not just a link to a separate admin page. Owner
+  // names stay free text (activities.current_person has no FK to a real
+  // employee row — a bigger schema change than this pass covers), so this
+  // is a name suggestion via datalist, not a true relational picker; the
+  // employee roster is still the source of the suggestions, not a
+  // free-for-all guess.
+  const [employeesLookup, setEmployeesLookup] = useState<{ id: string; full_name: string }[]>([]);
+  const [editingActivityId, setEditingActivityId] = useState<string | null>(null);
+  const [editingOwner, setEditingOwner] = useState({ current_person: "", backup_person: "" });
+  const [ownerSaveBusy, setOwnerSaveBusy] = useState(false);
+  useEffect(() => {
+    if (!session || session.user.role !== "admin") return;
+    request<{ id: string; full_name: string }[]>("/api/v1/admin/employees/lookup", session.access_token)
+      .then(setEmployeesLookup)
+      .catch(() => {});
+  }, [session]);
+  function startAssignOwner(a: GraphActivity) {
+    setEditingActivityId(a.id);
+    setEditingOwner({ current_person: a.current_person === "Organisation to confirm" ? "" : a.current_person, backup_person: a.backup_person });
+  }
+  async function saveAssignOwner(activityId: string) {
+    if (!session) return;
+    setOwnerSaveBusy(true);
+    try {
+      await request(`/api/v1/admin/activities/${activityId}`, session.access_token, {
+        method: "PATCH",
+        body: JSON.stringify({ current_person: editingOwner.current_person.trim() || "Organisation to confirm", backup_person: editingOwner.backup_person.trim() || "Department backup" }),
+      });
+      setGraphSelection((prev) =>
+        prev
+          ? { ...prev, activities: prev.activities.map((a) => (a.id === activityId ? { ...a, current_person: editingOwner.current_person.trim() || "Organisation to confirm", backup_person: editingOwner.backup_person.trim() || "Department backup" } : a)) }
+          : prev,
+      );
+      setEditingActivityId(null);
+      // The node's colour (owned vs gap) depends on ALL activities under
+      // that role, not just the one just edited — refetch so the graph
+      // and every readiness/coverage number derived from it stay honest.
+      setReloadKey((k) => k + 1);
+    } catch {
+      // FormModal-style inline errors would need more plumbing than this
+      // compact panel has room for; the busy state clearing is the signal
+      // to retry.
+    } finally {
+      setOwnerSaveBusy(false);
+    }
+  }
+  // BUILD PROMPT v5 item B2: nudge state lives here (not inside the
+  // Manager Dashboard render block below) for the same rules-of-hooks
+  // reason as the owner-assign state above — this component's early
+  // `if (!session) return` happens later, so every hook must be declared
+  // before it to stay unconditional across renders.
+  const [nudgeBusyId, setNudgeBusyId] = useState<string | null>(null);
+  const [nudgeResults, setNudgeResults] = useState<Record<string, { already_nudged: boolean; last_nudged_at?: string }>>({});
+  // Date.now() can't be called directly in the render body (React's
+  // purity rule) — a useState lazy initializer runs exactly once, at
+  // mount, which is the documented escape hatch for capturing an
+  // external impure value like this. Fine to be a little stale; this
+  // only gates whether the Nudge button shows a disabled "already
+  // nudged" state.
+  const [nowMs] = useState(() => Date.now());
+  async function nudgeMember(memberId: string) {
+    if (!session) return;
+    setNudgeBusyId(memberId);
+    try {
+      const result = await request<{ ok: boolean; already_nudged: boolean; nudged_count?: number; last_nudged_at?: string }>(
+        `/api/v1/manager/nudge/${memberId}`,
+        session.access_token,
+        { method: "POST" },
+      );
+      setNudgeResults((prev) => ({ ...prev, [memberId]: { already_nudged: result.already_nudged, last_nudged_at: result.last_nudged_at || new Date().toISOString() } }));
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : "Could not send the nudge.");
+      setTimeout(() => setToast(""), 3500);
+    } finally {
+      setNudgeBusyId(null);
+    }
+  }
   // Declared here (before the early login/signup returns below) because
   // it's a Hook — rules-of-hooks requires every hook to run on every
   // render regardless of those conditional returns. Memoized so the array
@@ -680,7 +758,11 @@ export default function WorkingPlatform() {
                     onOpenFull={() => goToView("graph")}
                   />
                 )}
-                <ReadinessRing readiness={dashboardData.readiness} caption="readiness score" />
+                <ReadinessRing
+                  readiness={dashboardData.readiness}
+                  caption="readiness score"
+                  drillDown={{ training: () => goToView("training"), cert_currency: () => goToView("certificates") }}
+                />
               </section>
               <div className={styles.stats}>
                 <Stat
@@ -910,14 +992,60 @@ export default function WorkingPlatform() {
                     <small>{graphSelection.kind === "department" ? "Department" : graphSelection.kind === "role" ? "Responsible role" : "Escalation contact"}</small>
                   </div>
                   <ul>
-                    {graphSelection.activities.map((a) => (
-                      <li key={a.id}>
-                        <b>{a.name}</b>
-                        <span>{a.contact_details} · SLA {a.sla}</span>
-                        <em>{a.escalation_level_1} → {a.escalation_level_2}</em>
-                      </li>
-                    ))}
+                    {graphSelection.activities.map((a) => {
+                      const unassigned = a.current_person === "Organisation to confirm";
+                      return (
+                        <li key={a.id}>
+                          <b>{a.name}</b>
+                          <span>{a.contact_details} · SLA {a.sla}</span>
+                          <em>{a.escalation_level_1} → {a.escalation_level_2}</em>
+                          <span>
+                            Owner: {unassigned ? <b className={styles.gapText}>Unassigned</b> : a.current_person}
+                          </span>
+                          {session.user.role === "admin" && editingActivityId !== a.id && (
+                            <button type="button" className={styles.secondaryBtn} onClick={() => startAssignOwner(a)}>
+                              {unassigned ? "Assign owner →" : "Reassign →"}
+                            </button>
+                          )}
+                          {editingActivityId === a.id && (
+                            <div className={styles.ownerAssignForm}>
+                              <label>
+                                Owner
+                                <input
+                                  list="onework-employee-names"
+                                  value={editingOwner.current_person}
+                                  onChange={(e) => setEditingOwner((prev) => ({ ...prev, current_person: e.target.value }))}
+                                  placeholder="Full name"
+                                />
+                              </label>
+                              <label>
+                                Backup
+                                <input
+                                  list="onework-employee-names"
+                                  value={editingOwner.backup_person}
+                                  onChange={(e) => setEditingOwner((prev) => ({ ...prev, backup_person: e.target.value }))}
+                                  placeholder="Full name"
+                                />
+                              </label>
+                              <div>
+                                <button type="button" disabled={ownerSaveBusy} onClick={() => saveAssignOwner(a.id)}>
+                                  {ownerSaveBusy ? "Saving…" : "Save"}
+                                </button>
+                                <button type="button" className={styles.secondaryBtn} onClick={() => setEditingActivityId(null)} disabled={ownerSaveBusy}>
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
+                  <datalist id="onework-employee-names">
+                    {employeesLookup.map((e) => (
+                      <option key={e.id} value={e.full_name} />
+                    ))}
+                  </datalist>
                   {session.user.role === "admin" && (
                     <button type="button" onClick={() => goToAdminSection("matrix")}>
                       Manage in Responsibility Matrix →
@@ -998,28 +1126,57 @@ export default function WorkingPlatform() {
                       <th>Department</th>
                       <th>Training</th>
                       <th>Overdue</th>
+                      <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {managerData.members.map((m) => (
-                      <tr key={m.id}>
-                        <td>{m.name}</td>
-                        <td>{m.email}</td>
-                        <td>{m.department || "—"}</td>
-                        <td>
-                          {m.completed}/{m.total} ({m.training_percent}%)
-                        </td>
-                        <td>
-                          {m.overdue_count > 0 ? (
-                            <span className={styles.legendDot} data-tone="risk" />
-                          ) : null}
-                          {m.overdue_count}
-                        </td>
-                      </tr>
-                    ))}
+                    {managerData.members.map((m) => {
+                      // BUILD PROMPT v5 item B2: "nudge from anywhere" —
+                      // an overdue row is now something a manager can act
+                      // on right here, not just observe. last_nudged_at
+                      // (persisted server-side) plus this session's own
+                      // nudgeResults keeps the "already nudged" state
+                      // accurate even before the next full data refetch.
+                      const nudged = nudgeResults[m.id];
+                      const lastNudgedAt = nudged?.last_nudged_at || m.last_nudged_at;
+                      const recentlyNudged = lastNudgedAt && nowMs - new Date(lastNudgedAt).getTime() < 24 * 60 * 60 * 1000;
+                      return (
+                        <tr key={m.id}>
+                          <td>{m.name}</td>
+                          <td>{m.email}</td>
+                          <td>{m.department || "—"}</td>
+                          <td>
+                            {m.completed}/{m.total} ({m.training_percent}%)
+                          </td>
+                          <td>
+                            {m.overdue_count > 0 ? (
+                              <span className={styles.legendDot} data-tone="risk" />
+                            ) : null}
+                            {m.overdue_count}
+                          </td>
+                          <td>
+                            {m.overdue_count > 0 &&
+                              (recentlyNudged ? (
+                                <small style={{ color: "#8b8f9e" }}>
+                                  Nudged {formatDate(lastNudgedAt!)}
+                                </small>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className={styles.secondaryBtn}
+                                  disabled={nudgeBusyId === m.id}
+                                  onClick={() => nudgeMember(m.id)}
+                                >
+                                  {nudgeBusyId === m.id ? "Sending…" : "Nudge"}
+                                </button>
+                              ))}
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {managerData.members.length === 0 && (
                       <tr>
-                        <td colSpan={5} className={styles.noRecords}>
+                        <td colSpan={6} className={styles.noRecords}>
                           No records found.
                         </td>
                       </tr>
@@ -1067,7 +1224,11 @@ export default function WorkingPlatform() {
           )}
           {!busy && adminData && adminSection === "overview" && (
             <section className={styles.orgReadiness}>
-              <ReadinessRing readiness={adminData.readiness} caption="org readiness" />
+              <ReadinessRing
+                readiness={adminData.readiness}
+                caption="org readiness"
+                drillDown={{ training: () => goToAdminSection("employees"), raci_coverage: () => goToAdminSection("matrix") }}
+              />
               <div>
                 <b>Organisation readiness</b>
                 <p>
@@ -1180,7 +1341,22 @@ function Stat({
 // transparent breakdown on hover/click rather than a black box. Score
 // >=70 reads as readiness-toned, otherwise risk-toned, so the ring color
 // itself carries meaning instead of always defaulting to one color.
-function ReadinessRing({ readiness, caption }: { readiness: Readiness | null | undefined; caption: string }) {
+// BUILD PROMPT v5 item B4: the score used to just be a number with a
+// breakdown tooltip — informative, but not actionable. Each component row
+// that has a real destination (a screen listing the actual people/rows
+// dragging that component down) is now a link there; a component with no
+// such screen for this caller (e.g. cert currency at org level, which has
+// no dedicated list view yet) stays plain text rather than a link to
+// nowhere.
+function ReadinessRing({
+  readiness,
+  caption,
+  drillDown,
+}: {
+  readiness: Readiness | null | undefined;
+  caption: string;
+  drillDown?: Partial<Record<string, () => void>>;
+}) {
   const [open, setOpen] = useState(false);
   // Defensive, not just decorative: a backend that hasn't picked up the
   // `readiness` field yet (a stale server mid-deploy, an older API
@@ -1210,14 +1386,26 @@ function ReadinessRing({ readiness, caption }: { readiness: Readiness | null | u
         <div className={styles.readinessBreakdown} role="tooltip">
           <b>What&apos;s behind this score</b>
           <ul>
-            {readiness.components.map((c) => (
-              <li key={c.key}>
-                <span>{c.label}</span>
-                <b>{c.percent}%</b>
-              </li>
-            ))}
+            {readiness.components.map((c) => {
+              const goTo = drillDown?.[c.key];
+              return (
+                <li key={c.key}>
+                  {goTo ? (
+                    <button type="button" onClick={() => { goTo(); setOpen(false); }}>
+                      <span>{c.label} →</span>
+                      <b>{c.percent}%</b>
+                    </button>
+                  ) : (
+                    <>
+                      <span>{c.label}</span>
+                      <b>{c.percent}%</b>
+                    </>
+                  )}
+                </li>
+              );
+            })}
           </ul>
-          <p>Average of the components above that currently apply.</p>
+          <p>Average of the components above that currently apply. Click a component with an arrow to see who&apos;s behind it.</p>
         </div>
       )}
     </div>

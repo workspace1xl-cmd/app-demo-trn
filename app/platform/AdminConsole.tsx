@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import styles from "./platform.module.css";
 import { API, request } from "./PlatformApp";
 import type { AdminSection } from "./PlatformApp";
@@ -174,6 +175,168 @@ function ConfirmDialog({ title, message, busy, onCancel, onConfirm }: { title: s
           <button type="button" className={styles.secondaryBtn} onClick={onCancel}>Cancel</button>
           <button type="button" className={styles.dangerBtn} disabled={busy} onClick={onConfirm}>{busy ? "Deleting…" : "Delete"}</button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CSV bulk import (BUILD PROMPT v5 item B3)
+// ---------------------------------------------------------------------------
+
+// A small hand-written parser rather than a dependency — this only needs
+// to handle the common real-world CSV shapes (quoted fields, embedded
+// commas, escaped "" quotes, \r\n or \n line endings), not the full RFC.
+function parseCsv(text: string): { headers: string[]; rows: string[][] } {
+  const rows: string[][] = [];
+  let row: string[] = []; let field = ""; let inQuotes = false;
+  const pushField = () => { row.push(field); field = ""; };
+  const pushRow = () => { pushField(); rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") pushField();
+    else if (c === "\n") pushRow();
+    else if (c === "\r") { /* skip, \n follows */ }
+    else field += c;
+  }
+  if (field || row.length) pushRow();
+  const nonEmpty = rows.filter((r) => r.some((v) => v.trim() !== ""));
+  const [headerRow, ...dataRows] = nonEmpty;
+  return { headers: (headerRow || []).map((h) => h.trim()), rows: dataRows };
+}
+
+type ImportField = { key: string; label: string; required?: boolean };
+type ImportResult = { created: number; errors: { row: number; message: string; [k: string]: unknown }[] };
+
+// Generic across Employees and Activities — the caller supplies the
+// target field list and the import endpoint; everything else (file read,
+// column mapping UI, preview, per-row error report) is shared. Column
+// mapping defaults to an exact (case-insensitive) header match, which
+// covers the common case of "export this system's own CSV, re-import
+// it here" without forcing a manual mapping step every time.
+function CsvImportModal({ title, fields, importPath, token, onClose, onImported }: { title: string; fields: ImportField[]; importPath: string; token: string; onClose: () => void; onImported: (result: ImportResult) => void }) {
+  const [parsed, setParsed] = useState<{ headers: string[]; rows: string[][] } | null>(null);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<ImportResult | null>(null);
+
+  function handleFile(file: File) {
+    setError(""); setResult(null);
+    file.text().then((text) => {
+      const p = parseCsv(text);
+      if (!p.headers.length || !p.rows.length) { setError("Couldn't find any data rows in that file."); return; }
+      const initialMapping: Record<string, string> = {};
+      for (const f of fields) {
+        const match = p.headers.find((h) => h.toLowerCase().replace(/[\s_-]/g, "") === f.key.toLowerCase().replace(/[\s_-]/g, ""));
+        if (match) initialMapping[f.key] = match;
+      }
+      setMapping(initialMapping);
+      setParsed(p);
+    });
+  }
+
+  async function runImport() {
+    if (!parsed) return;
+    const missingRequired = fields.filter((f) => f.required && !mapping[f.key]);
+    if (missingRequired.length) { setError(`Map a column for: ${missingRequired.map((f) => f.label).join(", ")}.`); return; }
+    setBusy(true); setError("");
+    try {
+      const headerIndex = new Map(parsed.headers.map((h, i) => [h, i]));
+      const rows = parsed.rows.map((row) => {
+        const obj: Record<string, string> = {};
+        for (const f of fields) {
+          const col = mapping[f.key];
+          if (col === undefined) continue;
+          const idx = headerIndex.get(col);
+          obj[f.key] = idx !== undefined ? (row[idx] || "").trim() : "";
+        }
+        return obj;
+      });
+      const res = await submitJson(importPath, token, "POST", { rows });
+      setResult(res as ImportResult);
+      onImported(res as ImportResult);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Import failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={title} onClose={onClose} wide>
+      <div className={styles.csvImport}>
+        {!parsed && (
+          <div className={styles.csvDrop}>
+            <p>Upload a CSV file. The first row must be column headers.</p>
+            <input type="file" accept=".csv,text/csv" onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
+            {error && <div className={styles.error}>{error}</div>}
+          </div>
+        )}
+        {parsed && !result && (
+          <>
+            <p className={styles.csvSummary}>{parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} found. Match each field below to a column from your file.</p>
+            <div className={styles.csvMapping}>
+              {fields.map((f) => (
+                <label key={f.key}>
+                  {f.label}{f.required && <span className={styles.gapText}>*</span>}
+                  <select value={mapping[f.key] || ""} onChange={(e) => setMapping((prev) => ({ ...prev, [f.key]: e.target.value }))}>
+                    <option value="">— Not mapped —</option>
+                    {parsed.headers.map((h) => (
+                      <option key={h} value={h}>{h}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+            <div className={styles.csvPreviewWrap}>
+              <table className={styles.csvPreview}>
+                <thead>
+                  <tr>{fields.map((f) => <th key={f.key}>{f.label}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {parsed.rows.slice(0, 5).map((row, i) => (
+                    <tr key={i}>
+                      {fields.map((f) => {
+                        const col = mapping[f.key];
+                        const idx = col ? parsed.headers.indexOf(col) : -1;
+                        return <td key={f.key}>{idx >= 0 ? row[idx] : <span style={{ color: "#c3c5cf" }}>—</span>}</td>;
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {parsed.rows.length > 5 && <small>…and {parsed.rows.length - 5} more row{parsed.rows.length - 5 === 1 ? "" : "s"}.</small>}
+            </div>
+            {error && <div className={styles.error}>{error}</div>}
+            <div className={styles.confirmActions}>
+              <button type="button" className={styles.secondaryBtn} onClick={() => { setParsed(null); setMapping({}); }}>Choose a different file</button>
+              <button type="button" className={styles.primaryBtn} disabled={busy} onClick={runImport}>{busy ? "Importing…" : `Import ${parsed.rows.length} row${parsed.rows.length === 1 ? "" : "s"}`}</button>
+            </div>
+          </>
+        )}
+        {result && (
+          <div className={styles.csvResult}>
+            <p>
+              <b style={{ color: "var(--readiness,#1c8a5f)" }}>{result.created} created.</b>{" "}
+              {result.errors.length > 0 && <span className={styles.gapText}>{result.errors.length} row{result.errors.length === 1 ? "" : "s"} skipped.</span>}
+            </p>
+            {result.errors.length > 0 && (
+              <div className={styles.csvErrorList}>
+                {result.errors.map((e, i) => (
+                  <div key={i}>Row {e.row}: {e.message}</div>
+                ))}
+              </div>
+            )}
+            <div className={styles.confirmActions}>
+              <button type="button" className={styles.primaryBtn} onClick={onClose}>Done</button>
+            </div>
+          </div>
+        )}
       </div>
     </Modal>
   );
@@ -395,13 +558,14 @@ function useClientList<T>(token: string, path: string, searchFields: (keyof T)[]
 // Toolbar
 // ---------------------------------------------------------------------------
 
-function Toolbar({ q, onSearch, placeholder, createLabel, onCreate }: { q: string; onSearch: (v: string) => void; placeholder: string; createLabel?: string; onCreate?: () => void }) {
+function Toolbar({ q, onSearch, placeholder, createLabel, onCreate, extra }: { q: string; onSearch: (v: string) => void; placeholder: string; createLabel?: string; onCreate?: () => void; extra?: React.ReactNode }) {
   return (
     <div className={styles.toolbar}>
       <div className={styles.searchBox}>
         <input value={q} placeholder={placeholder} onChange={(e) => onSearch(e.target.value)} />
         {q && <button type="button" className={styles.clearBtn} onClick={() => onSearch("")} aria-label="Clear search">✕</button>}
       </div>
+      {extra}
       {createLabel && onCreate && <button type="button" className={styles.primaryBtn} onClick={onCreate}>{createLabel}</button>}
     </div>
   );
@@ -520,9 +684,18 @@ function EmployeesPanel({ token }: { token: string }) {
     { key: "password", label: "Reset Password", type: "password", minLength: 8, helpText: "Leave blank to keep the current password." },
   ];
 
+  const [importOpen, setImportOpen] = useState(false);
+
   return (
     <section>
-      <Toolbar q={list.q} onSearch={list.setQ} placeholder="Search by name or Email ID" createLabel="+ Add Employee" onCreate={() => setModal({ mode: "create" })} />
+      <Toolbar
+        q={list.q}
+        onSearch={list.setQ}
+        placeholder="Search by name or Email ID"
+        createLabel="+ Add Employee"
+        onCreate={() => setModal({ mode: "create" })}
+        extra={<button type="button" className={styles.secondaryBtn} onClick={() => setImportOpen(true)}>⇪ Import CSV</button>}
+      />
       <Feedback error={list.error} toast={toast} />
       <DataTable
         columns={[
@@ -559,6 +732,22 @@ function EmployeesPanel({ token }: { token: string }) {
           }}
         />
       )}
+      {importOpen && (
+        <CsvImportModal
+          title="Import Employees from CSV"
+          token={token}
+          importPath="/api/v1/admin/employees/import"
+          fields={[
+            { key: "full_name", label: "Full Name", required: true },
+            { key: "email", label: "Email ID", required: true },
+            { key: "department", label: "Department" },
+            { key: "manager_email", label: "Manager's Email ID" },
+            { key: "role", label: "Role" },
+          ]}
+          onClose={() => { setImportOpen(false); setReloadKey((k) => k + 1); }}
+          onImported={() => setReloadKey((k) => k + 1)}
+        />
+      )}
     </section>
   );
 }
@@ -592,10 +781,18 @@ function MatrixPanel({ token }: { token: string }) {
     { key: "training_module_link", label: "Training Module Link", type: "text" },
   ];
   const editFields: FieldDef[] = [...fields, { key: "status", label: "Status", type: "select", options: [{ value: "draft", label: "Draft" }, { value: "confirmed", label: "Confirmed" }, { value: "archived", label: "Archived" }] }];
+  const [importOpen, setImportOpen] = useState(false);
 
   return (
     <section>
-      <Toolbar q={list.q} onSearch={list.setQ} placeholder="Search the responsibility matrix" createLabel="+ Add Activity" onCreate={() => setModal({ mode: "create" })} />
+      <Toolbar
+        q={list.q}
+        onSearch={list.setQ}
+        placeholder="Search the responsibility matrix"
+        createLabel="+ Add Activity"
+        onCreate={() => setModal({ mode: "create" })}
+        extra={<button type="button" className={styles.secondaryBtn} onClick={() => setImportOpen(true)}>⇪ Import CSV</button>}
+      />
       <Feedback error={list.error} toast={toast} />
       <DataTable
         columns={[
@@ -626,6 +823,27 @@ function MatrixPanel({ token }: { token: string }) {
             setTimeout(() => setToast(""), 3000);
             setModal(null); setReloadKey((k) => k + 1);
           }}
+        />
+      )}
+      {importOpen && (
+        <CsvImportModal
+          title="Import Responsibility Matrix from CSV"
+          token={token}
+          importPath="/api/v1/admin/activities/import"
+          fields={[
+            { key: "name", label: "Activity Name", required: true },
+            { key: "department", label: "Department", required: true },
+            { key: "responsible_role", label: "Responsible Role", required: true },
+            { key: "current_person", label: "Current Person" },
+            { key: "backup_person", label: "Backup Person" },
+            { key: "contact_details", label: "Contact Details", required: true },
+            { key: "sla", label: "SLA", required: true },
+            { key: "escalation_level_1", label: "Escalation Level 1", required: true },
+            { key: "escalation_level_2", label: "Escalation Level 2", required: true },
+            { key: "sop_link", label: "SOPGalaxy Link" },
+          ]}
+          onClose={() => { setImportOpen(false); setReloadKey((k) => k + 1); }}
+          onImported={() => setReloadKey((k) => k + 1)}
         />
       )}
     </section>
@@ -1508,6 +1726,7 @@ function TrendChart({ trend }: { trend: ExecTrendPoint[] }) {
 }
 
 function ExecPanel({ token }: { token: string }) {
+  const router = useRouter();
   const [data, setData] = useState<ExecData | null>(null);
   const [error, setError] = useState("");
   const activities = useLookup<GraphActivity>(token, "/api/v1/activities");
@@ -1524,9 +1743,18 @@ function ExecPanel({ token }: { token: string }) {
         <TrendChart trend={data?.trend || []} />
       </div>
       {gapDepartments.length > 0 && (
-        <div className={styles.error} style={{ marginTop: 16 }}>
-          <b>{gapDepartments.length} department{gapDepartments.length === 1 ? "" : "s"} with an ownership gap:</b>{" "}
-          {gapDepartments.map((d) => d.name).join(", ")} — under half of their Responsibility Matrix rows have a named owner.
+        // BUILD PROMPT v5 item B1: this used to just report the gap. It's
+        // now a button into the exact screen that fixes it, not a dead
+        // end — "reports a problem it can't resolve" was the core
+        // diagnosis three independent reviews converged on.
+        <div className={styles.error} style={{ marginTop: 16, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <span>
+            <b>{gapDepartments.length} department{gapDepartments.length === 1 ? "" : "s"} with an ownership gap:</b>{" "}
+            {gapDepartments.map((d) => d.name).join(", ")} — under half of their Responsibility Matrix rows have a named owner.
+          </span>
+          <button type="button" onClick={() => router.push("/platform/admin/matrix")} style={{ flexShrink: 0, whiteSpace: "nowrap" }}>
+            Resolve in Responsibility Matrix →
+          </button>
         </div>
       )}
       <DataTable
