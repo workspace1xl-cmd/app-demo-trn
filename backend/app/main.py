@@ -559,7 +559,10 @@ def analytics(user: User = Depends(admin_user), db: Session = Depends(get_db)):
 
 @app.get("/api/v1/admin/exec")
 def exec_health(user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    trend = db.scalars(select(ReadinessSnapshot).where(ReadinessSnapshot.org_id == user.org_id).order_by(ReadinessSnapshot.captured_at)).all()
+    # Most recent 30 days, oldest first for the chart — mirrors the Edge
+    # Function's fix (descending + limit, then reversed) so this can't
+    # regress the same way if a limit is added here later.
+    trend = list(reversed(db.scalars(select(ReadinessSnapshot).where(ReadinessSnapshot.org_id == user.org_id).order_by(ReadinessSnapshot.captured_at.desc()).limit(30)).all()))
     departments = db.scalars(select(Department).where(Department.org_id == user.org_id).order_by(Department.name)).all()
     dept_users = db.scalars(select(User).where(User.org_id == user.org_id)).all()
     enrollments = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id)).all()
