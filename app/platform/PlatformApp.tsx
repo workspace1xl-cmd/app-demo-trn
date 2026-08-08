@@ -739,12 +739,29 @@ export default function WorkingPlatform() {
             )}
           </div>
         </header>
-        <div className={styles.content}>
-          {busy && (
+        <div className={styles.content} key={`${view}-${view === "admin" ? adminSection : ""}`}>
+          {/* Keyed on view (+ admin section) so React genuinely remounts
+              this div — and its CSS fade-in animation replays — on every
+              navigation. Deliberately NOT keyed on `busy`: a background
+              refetch within the same view must NOT retrigger this, or
+              the "keep old content visible while refetching" fix above
+              would still visibly judder on every sync. */}
+          {/* The old version hid every content block on `!busy`, which
+              meant a background refetch (after a CSV import, an inline
+              owner-assign, marking a notification read, anything that
+              bumps reloadKey) unmounted the whole screen back to this
+              loading block and remounted it a moment later — a real
+              blink, not a CSS timing issue. Now: the full-page loading
+              state only shows when there's genuinely nothing to display
+              yet (first load); once data exists it stays on screen
+              during any later refetch, with a small non-blocking
+              "Syncing…" indicator near the header instead of a wipe. */}
+          {busy && !data && (
             <div className={styles.loading}>Synchronising verified data…</div>
           )}
+          {busy && data && <div className={styles.syncingBadge}>Syncing…</div>}
           {error && <div className={styles.error}>{error}</div>}
-          {!busy && dashboardData && (
+          {dashboardData && (
             <>
               <section className={styles.hero}>
                 <div>
@@ -821,7 +838,7 @@ export default function WorkingPlatform() {
               )}
             </>
           )}
-          {!busy && view === "search" && (
+          {view === "search" && (
             <>
               <form className={styles.search} onSubmit={search}>
                 <input
@@ -829,7 +846,7 @@ export default function WorkingPlatform() {
                   onChange={(e) => setQuery(e.target.value)}
                   placeholder="Ask: How do I request leave?"
                 />
-                <button>Search verified knowledge →</button>
+                <button disabled={busy}>{busy ? "Searching…" : "Search verified knowledge →"}</button>
               </form>
               {searchData?.query && (
                 <section className={styles.answer}>
@@ -867,7 +884,7 @@ export default function WorkingPlatform() {
               )}
             </>
           )}
-          {!busy && trainingData && (
+          {trainingData && (
             <div className={styles.list}>
               {trainingData.map((m) => (
                 <article key={m.id}>
@@ -932,7 +949,7 @@ export default function WorkingPlatform() {
               {trainingData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
-          {!busy && matrixData && (
+          {matrixData && (
             <div className={styles.table}>
               <div>
                 <b>ACTIVITY</b>
@@ -980,7 +997,7 @@ export default function WorkingPlatform() {
               {matrixData.length === 0 && <div className={styles.noRecords}>No records found.</div>}
             </div>
           )}
-          {!busy && fullGraphData && (
+          {fullGraphData && (
             <>
               <div className={styles.graphToolbar}>
                 <select value={graphDeptFilter} onChange={(e) => setGraphDeptFilter(e.target.value)}>
@@ -1073,7 +1090,7 @@ export default function WorkingPlatform() {
               )}
             </>
           )}
-          {!busy && certificateData && (
+          {certificateData && (
             <div className={styles.certificates}>
               {certificateData.map((c) => (
                 <article key={c.id}>
@@ -1108,7 +1125,7 @@ export default function WorkingPlatform() {
               )}
             </div>
           )}
-          {!busy && view === "manager" && managerData && (
+          {view === "manager" && managerData && (
             <>
               <section className={styles.orgReadiness}>
                 <ReadinessRing readiness={managerData.team_readiness} caption="team readiness" />
@@ -1245,7 +1262,7 @@ export default function WorkingPlatform() {
               )}
             </>
           )}
-          {!busy && adminData && adminSection === "overview" && (
+          {adminData && adminSection === "overview" && (
             <section className={styles.orgReadiness}>
               <ReadinessRing
                 readiness={adminData.readiness}
@@ -1263,7 +1280,7 @@ export default function WorkingPlatform() {
               </div>
             </section>
           )}
-          {!busy && adminData && adminSection === "overview" && (
+          {adminData && adminSection === "overview" && (
             <div className={styles.stats}>
               <Stat
                 label="EMPLOYEES"

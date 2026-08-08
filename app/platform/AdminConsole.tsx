@@ -120,10 +120,16 @@ function Pagination({ page, pageSize, total, onPage, onPageSize }: { page: numbe
 type Column<T> = { key: string; label: string; render?: (row: T) => React.ReactNode };
 
 function DataTable<T>({ columns, rows, rowId, loading, actions }: { columns: Column<T>[]; rows: T[]; rowId: (row: T) => string; loading: boolean; actions?: (row: T) => React.ReactNode }) {
-  if (loading) return <div className={styles.loading}>Synchronising verified data…</div>;
-  if (!rows.length) return <div className={styles.noRecords}>No records found.</div>;
+  // Same fix as PlatformApp's top-level content: a table that's already
+  // showing rows must NOT vanish back to a bare loading line every time
+  // reloadKey bumps (after any Create/Edit/Import/delete across all 8
+  // admin panels this component drives) — that was the actual "blink,"
+  // not a missing CSS transition. Only the genuine first load (no rows
+  // yet) gets the full loading state.
+  if (loading && !rows.length) return <div className={styles.loading}>Synchronising verified data…</div>;
+  if (!loading && !rows.length) return <div className={styles.noRecords}>No records found.</div>;
   return (
-    <div className={styles.dataTable}>
+    <div className={styles.dataTable} data-syncing={loading && rows.length > 0 ? "true" : "false"}>
       <table>
         <thead>
           <tr>
