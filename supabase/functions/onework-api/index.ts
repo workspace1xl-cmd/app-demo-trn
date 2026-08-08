@@ -226,34 +226,71 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     if (path === "/api/v1/manager/dashboard") {
       if (user.role !== "manager" && !isAdmin) return json({ detail: "Manager permission required." }, 403);
-      if (!user.department_id) return json({ detail: "Your account isn't linked to a department yet. Ask an admin to assign one." }, 409);
-      const [{ data: dept }, { data: teamUsers }, { count: moduleCount }] = await Promise.all([
-        supabase.from("departments").select("id,name").eq("id", user.department_id).eq("org_id", user.org_id).maybeSingle(),
-        supabase.from("app_users").select("id,full_name,email").eq("org_id", user.org_id).eq("department_id", user.department_id).eq("is_active", true).order("full_name"),
+      // BUILD PROMPT v5 item A3: real reports-to hierarchy, not the
+      // department_id proxy the first version of this route used.
+      // Department is not a reporting line — multiple managers can share
+      // a department, and people report across departments. This BFS
+      // walks the real manager_id chain (including manager-of-manager
+      // rollup, so a skip-level sees their whole subtree), depth-capped
+      // at 10 as a defence against a data-entry cycle rather than relying
+      // solely on the DB's manager_id != id constraint.
+      const [{ data: allUsers }, { data: departments }, { count: moduleCount }] = await Promise.all([
+        supabase.from("app_users").select("id,full_name,email,manager_id,department_id").eq("org_id", user.org_id).eq("is_active", true),
+        supabase.from("departments").select("id,name").eq("org_id", user.org_id),
         supabase.from("training_modules").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("status", "published"),
       ]);
-      const teamIds = (teamUsers || []).map((u) => u.id);
+      const deptNameById = new Map((departments || []).map((d) => [d.id, d.name]));
+      const directReportsOf = new Map<string, typeof allUsers>();
+      for (const u of allUsers || []) {
+        if (!u.manager_id) continue;
+        const list = directReportsOf.get(u.manager_id) || [];
+        list.push(u);
+        directReportsOf.set(u.manager_id, list as any);
+      }
+      const subtree: typeof allUsers = [];
+      const seen = new Set<string>([user.id]);
+      let frontier = [user.id];
+      for (let depth = 0; depth < 10 && frontier.length; depth++) {
+        const next: string[] = [];
+        for (const managerId of frontier) {
+          for (const report of (directReportsOf.get(managerId) || []) as any[]) {
+            if (seen.has(report.id)) continue;
+            seen.add(report.id);
+            subtree.push(report);
+            next.push(report.id);
+          }
+        }
+        frontier = next;
+      }
+      const teamIds = subtree.map((u: any) => u.id);
+      const teamDeptIds = Array.from(new Set(subtree.map((u: any) => u.department_id).filter(Boolean)));
+      const teamDepartments = teamDeptIds.map((id) => ({ id, name: deptNameById.get(id) || "Unknown" })).sort((a, b) => a.name.localeCompare(b.name));
+      const teamDeptNames = teamDepartments.map((d) => d.name);
       const [{ data: enrollments }, { data: activities }] = await Promise.all([
         teamIds.length ? supabase.from("enrollments").select("user_id,status,due_date").eq("org_id", user.org_id).in("user_id", teamIds) : Promise.resolve({ data: [] as { user_id: string; status: string; due_date: string | null }[] }),
-        dept ? supabase.from("activities").select("id,name,department,responsible_role,current_person,backup_person,contact_details,sla,escalation_level_1,escalation_level_2,sop_link,training_module_link,status").eq("org_id", user.org_id).eq("department", dept.name) : Promise.resolve({ data: [] as unknown[] }),
+        teamDeptNames.length ? supabase.from("activities").select("id,name,department,responsible_role,current_person,backup_person,contact_details,sla,escalation_level_1,escalation_level_2,sop_link,training_module_link,status").eq("org_id", user.org_id).in("department", teamDeptNames) : Promise.resolve({ data: [] as unknown[] }),
       ]);
       const today = new Date().toISOString().slice(0, 10);
       const total = moduleCount || 0;
-      const members = (teamUsers || []).map((member) => {
+      const members = subtree.map((member: any) => {
         const rows = (enrollments || []).filter((e) => e.user_id === member.id);
         const completed = rows.filter((e) => e.status === "completed").length;
         const overdue = rows.filter((e) => e.due_date && e.due_date < today && e.status !== "completed").length;
         const percent = total ? Math.round((completed / total) * 100) : 0;
-        return { id: member.id, name: member.full_name, email: member.email, training_percent: percent, completed, total, overdue_count: overdue };
+        return { id: member.id, name: member.full_name, email: member.email, department: deptNameById.get(member.department_id) || null, training_percent: percent, completed, total, overdue_count: overdue };
       });
       const teamTotal = members.reduce((sum, m) => sum + m.total, 0), teamCompleted = members.reduce((sum, m) => sum + m.completed, 0);
       const teamReadiness = scoreFromComponents([{ key: "training", label: "Team training completion", percent: teamTotal ? Math.round((teamCompleted / teamTotal) * 100) : 0 }]);
       return json({
-        department: dept ? { id: dept.id, name: dept.name } : null,
+        departments: teamDepartments,
         team_readiness: teamReadiness,
         members,
         overdue_total: members.reduce((sum, m) => sum + m.overdue_count, 0),
         activities: activities || [],
+        // Honesty signal for the UI: distinguishes "you have zero direct
+        // or rolled-up reports" (a real, valid org state — nudge to ask
+        // an admin to set manager_id) from "loading"/"error".
+        has_reports: members.length > 0,
       });
     }
 
@@ -530,13 +567,31 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     // Administrator: employees
     // -------------------------------------------------------------------
+    // Unpaginated id+name lookup for the manager-picker dropdown (BUILD
+    // PROMPT v5 item A3) — the main employees list is paginated and a
+    // manager can be on any page, so the dropdown needs its own source.
+    if (path === "/api/v1/admin/employees/lookup" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data, error } = await supabase.from("app_users").select("id,full_name").eq("org_id", user.org_id).eq("is_active", true).order("full_name");
+      if (error) throw error;
+      return json(data || []);
+    }
     if (path === "/api/v1/admin/employees" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const query = rawUrl.searchParams.get("q");
-      let request = supabase.from("app_users").select("id,email,full_name,role,is_active,created_at,department_id,departments(name)", { count: "exact" }).eq("org_id", user.org_id);
+      let request = supabase.from("app_users").select("id,email,full_name,role,is_active,created_at,department_id,manager_id,departments(name)", { count: "exact" }).eq("org_id", user.org_id);
       if (query) request = request.or(`full_name.ilike.%${query}%,email.ilike.%${query}%`);
       const { data, error, count } = await request.order("full_name").range(from, to); if (error) throw error;
-      return json({ items: (data || []).map((item: any) => ({ ...item, department_name: item.departments?.name || null, departments: undefined })), page, page_size: pageSize, total: count || 0 });
+      const managers = new Map((data || []).map((u: any) => [u.id, u.full_name]));
+      // manager_id can point at anyone in the org, not just this page, so
+      // a manager whose page isn't currently loaded still needs a name —
+      // fetch the missing ones by id rather than leaving manager_name blank.
+      const missingManagerIds = Array.from(new Set((data || []).map((u: any) => u.manager_id).filter((id: string | null) => id && !managers.has(id))));
+      if (missingManagerIds.length) {
+        const { data: extra } = await supabase.from("app_users").select("id,full_name").in("id", missingManagerIds);
+        for (const m of extra || []) managers.set(m.id, m.full_name);
+      }
+      return json({ items: (data || []).map((item: any) => ({ ...item, department_name: item.departments?.name || null, manager_name: item.manager_id ? managers.get(item.manager_id) || null : null, departments: undefined })), page, page_size: pageSize, total: count || 0 });
     }
     if (path === "/api/v1/admin/employees" && req.method === "POST") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
@@ -548,6 +603,10 @@ Deno.serve(async (req) => {
       const { data, error } = await supabase.rpc("admin_create_user", { p_org_id: user.org_id, p_department_id: body.department_id || null, p_email: body.email, p_full_name: body.full_name.trim(), p_role: body.role, p_password: body.password });
       const created = data?.[0];
       if (error || !created) return json({ detail: error?.message?.includes("duplicate") ? "An employee with this Email ID already exists." : "Could not create the employee." }, 409);
+      // admin_create_user predates manager_id (BUILD PROMPT v5 item A3) and
+      // its signature isn't touched here — set it with a follow-up update
+      // instead of a migration to the RPC, to keep this change additive.
+      if (body.manager_id) await supabase.from("app_users").update({ manager_id: body.manager_id }).eq("id", created.id).eq("org_id", user.org_id);
       const { data: modules } = await supabase.from("training_modules").select("id,sequence").eq("org_id", user.org_id).order("sequence");
       if (modules?.length) await supabase.from("enrollments").insert(modules.map((m) => ({ org_id: user.org_id, user_id: created.id, module_id: m.id, status: m.sequence === 1 ? "assigned" : "locked", assigned_by: user.id, assigned_at: new Date().toISOString() })));
       await audit(user, "employee.create", "app_user", created.id, { role: created.role }); return json(created, 201);
@@ -558,10 +617,14 @@ Deno.serve(async (req) => {
       const body = await req.json(); const patch: Record<string, unknown> = {};
       if (body.full_name !== undefined) patch.full_name = String(body.full_name).trim();
       if (body.department_id !== undefined) patch.department_id = body.department_id || null;
+      if (body.manager_id !== undefined) {
+        if (body.manager_id === employeeMatch[1]) return fieldError("manager_id", "An employee cannot be their own manager.");
+        patch.manager_id = body.manager_id || null;
+      }
       if (body.role !== undefined) { if (!["employee","manager","content_admin","admin"].includes(body.role)) return fieldError("role", "Select a valid role."); patch.role = body.role; }
       if (body.is_active !== undefined) patch.is_active = Boolean(body.is_active);
       if (Object.keys(patch).length) {
-        const { data, error } = await supabase.from("app_users").update(patch).eq("id", employeeMatch[1]).eq("org_id", user.org_id).select("id,email,full_name,role,is_active,department_id").maybeSingle();
+        const { data, error } = await supabase.from("app_users").update(patch).eq("id", employeeMatch[1]).eq("org_id", user.org_id).select("id,email,full_name,role,is_active,department_id,manager_id").maybeSingle();
         if (error) throw error; if (!data) return json({ detail: "Employee not found." }, 404);
         await audit(user, "employee.update", "app_user", data.id, patch);
       }
@@ -571,7 +634,7 @@ Deno.serve(async (req) => {
         if (!ok) return json({ detail: "Employee not found." }, 404);
         await audit(user, "employee.reset_password", "app_user", employeeMatch[1]);
       }
-      const { data: fresh, error: freshError } = await supabase.from("app_users").select("id,email,full_name,role,is_active,department_id").eq("id", employeeMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      const { data: fresh, error: freshError } = await supabase.from("app_users").select("id,email,full_name,role,is_active,department_id,manager_id").eq("id", employeeMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (freshError) throw freshError; if (!fresh) return json({ detail: "Employee not found." }, 404);
       return json(fresh);
     }

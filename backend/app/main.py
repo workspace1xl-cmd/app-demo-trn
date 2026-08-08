@@ -247,34 +247,64 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
 # admin Employees form before this route existed — nothing previously
 # treated it differently from "employee".
 # -----------------------------------------------------------------------
+# BUILD PROMPT v5 item A3 — mirrors the Edge Function's manager/dashboard
+# rewrite: walks the real manager_id chain (depth-capped BFS, so
+# manager-of-manager rollup works) instead of the department_id proxy the
+# first version used. Department is not a reporting line.
+def _team_subtree(db: Session, org_id: str, root_id: str) -> list[User]:
+    all_users = db.scalars(select(User).where(User.org_id == org_id, User.is_active == True)).all()  # noqa: E712
+    direct_reports_of: dict[str, list[User]] = {}
+    for u in all_users:
+        if u.manager_id:
+            direct_reports_of.setdefault(u.manager_id, []).append(u)
+    subtree: list[User] = []
+    seen = {root_id}
+    frontier = [root_id]
+    for _ in range(10):
+        if not frontier:
+            break
+        nxt: list[str] = []
+        for manager_id in frontier:
+            for report in direct_reports_of.get(manager_id, []):
+                if report.id in seen:
+                    continue
+                seen.add(report.id)
+                subtree.append(report)
+                nxt.append(report.id)
+        frontier = nxt
+    return subtree
+
+
 @app.get("/api/v1/manager/dashboard")
 def manager_dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
     if user.role not in ("manager", "admin"):
         raise HTTPException(403, "Manager permission required.")
-    if not user.department_id:
-        raise HTTPException(409, "Your account isn't linked to a department yet. Ask an admin to assign one.")
-    dept = db.scalar(select(Department).where(Department.id == user.department_id, Department.org_id == user.org_id))
-    team = db.scalars(select(User).where(User.org_id == user.org_id, User.department_id == user.department_id, User.is_active == True)).all()  # noqa: E712
+    subtree = _team_subtree(db, user.org_id, user.id)
+    dept_by_id = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == user.org_id)).all()}
+    team_dept_ids = sorted({m.department_id for m in subtree if m.department_id})
+    team_departments = [{"id": did, "name": dept_by_id.get(did, "Unknown")} for did in team_dept_ids]
+    team_dept_names = [d["name"] for d in team_departments]
     total_modules = db.scalar(select(func.count()).select_from(TrainingModule).where(TrainingModule.org_id == user.org_id, TrainingModule.status == "published")) or 0
     today = date.today()
     members = []
-    for member in team:
+    for member in subtree:
         rows = db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == member.id)).all()
         completed = sum(1 for r in rows if r.status == "completed")
         overdue = sum(1 for r in rows if r.due_date and r.due_date < today and r.status != "completed")
         percent = _round_half_up(completed / total_modules * 100) if total_modules else 0
-        members.append({"id": member.id, "name": member.full_name, "email": member.email, "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue})
+        members.append({"id": member.id, "name": member.full_name, "email": member.email, "department": dept_by_id.get(member.department_id), "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue})
     team_total = sum(m["total"] for m in members)
     team_completed = sum(m["completed"] for m in members)
     team_percent = _round_half_up(team_completed / team_total * 100) if team_total else 0
     team_readiness = _score_from_components([{"key": "training", "label": "Team training completion", "percent": team_percent}])
-    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, Activity.department == dept.name)).all() if dept else []
+    activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, Activity.department.in_(team_dept_names))).all() if team_dept_names else []
     return {
-        "department": {"id": dept.id, "name": dept.name} if dept else None,
+        "departments": team_departments,
         "team_readiness": team_readiness,
         "members": members,
         "overdue_total": sum(m["overdue_count"] for m in members),
         "activities": [activity_dict(a) for a in activities],
+        "has_reports": len(members) > 0,
     }
 
 
@@ -613,7 +643,16 @@ def update_department(department_id: str, payload: DepartmentUpdate, user: User 
 # Administrator: employees
 # ---------------------------------------------------------------------------
 def employee_dict(item: User) -> dict:
-    return {"id": item.id, "email": item.email, "full_name": item.full_name, "role": item.role, "is_active": item.is_active, "department_id": item.department_id, "created_at": item.created_at}
+    return {"id": item.id, "email": item.email, "full_name": item.full_name, "role": item.role, "is_active": item.is_active, "department_id": item.department_id, "manager_id": item.manager_id, "created_at": item.created_at}
+
+
+# Unpaginated id+name lookup for the manager-picker dropdown (BUILD PROMPT
+# v5 item A3) — the main employees list is paginated and a manager can be
+# on any page, so the dropdown needs its own full-roster source.
+@app.get("/api/v1/admin/employees/lookup")
+def employees_lookup(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(User).where(User.org_id == user.org_id, User.is_active == True).order_by(User.full_name)).all()  # noqa: E712
+    return [{"id": u.id, "full_name": u.full_name} for u in rows]
 
 
 @app.get("/api/v1/admin/employees")
@@ -622,7 +661,8 @@ def list_employees(page: int = Query(default=1, ge=1), page_size: int = Query(de
     if q: stmt = stmt.where(or_(User.full_name.ilike(f"%{q}%"), User.email.ilike(f"%{q}%")))
     rows, meta = paginate_query(stmt.order_by(User.full_name), db, page, page_size)
     departments = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == user.org_id)).all()}
-    return {"items": [{**employee_dict(item), "department_name": departments.get(item.department_id)} for item in rows], **meta}
+    managers = {m.id: m.full_name for m in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
+    return {"items": [{**employee_dict(item), "department_name": departments.get(item.department_id), "manager_name": managers.get(item.manager_id)} for item in rows], **meta}
 
 
 @app.post("/api/v1/admin/employees", status_code=201)
@@ -631,7 +671,7 @@ def create_employee(payload: EmployeeCreate, user: User = Depends(admin_user), d
         raise HTTPException(400, {"detail": "Select a valid role.", "field": "role"})
     if db.scalar(select(User).where(User.org_id == user.org_id, func.lower(User.email) == payload.email.lower())):
         raise HTTPException(409, "An employee with this Email ID already exists.")
-    item = User(org_id=user.org_id, department_id=payload.department_id, email=payload.email.lower(), full_name=payload.full_name.strip(), role=payload.role, password_hash=hash_password(payload.password))
+    item = User(org_id=user.org_id, department_id=payload.department_id, manager_id=payload.manager_id, email=payload.email.lower(), full_name=payload.full_name.strip(), role=payload.role, password_hash=hash_password(payload.password))
     db.add(item); db.flush()
     modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id).order_by(TrainingModule.sequence)).all()
     for module in modules:
@@ -648,6 +688,9 @@ def update_employee(employee_id: str, payload: EmployeeUpdate, user: User = Depe
         item.role = payload.role
     if payload.full_name is not None: item.full_name = payload.full_name.strip()
     if payload.department_id is not None: item.department_id = payload.department_id or None
+    if payload.manager_id is not None:
+        if payload.manager_id == item.id: raise HTTPException(400, {"detail": "An employee cannot be their own manager.", "field": "manager_id"})
+        item.manager_id = payload.manager_id or None
     if payload.is_active is not None: item.is_active = payload.is_active
     if payload.password:
         item.password_hash = hash_password(payload.password)

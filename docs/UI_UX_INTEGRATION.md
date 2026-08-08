@@ -25,7 +25,7 @@ The production application is in `app/platform`. It uses isolated module CSS, so
 
 ## API adapter boundary
 
-`app/platform/page.tsx` sends JSON to `NEXT_PUBLIC_API_URL`. A replacement backend only needs to preserve the documented route shapes for login, dashboard, activities, SOPs, training, certificates, search, feedback and admin analytics. No visual component imports server credentials.
+`app/platform/PlatformApp.tsx` sends JSON to `NEXT_PUBLIC_API_URL`. A replacement backend only needs to preserve the documented route shapes for login, dashboard, activities, manager dashboard, notifications, training, certificates, search, feedback and admin analytics (including exec view). There is no `/sops` route — SOP documents live entirely in SOPGalaxy and are never proxied through this API. No visual component imports server credentials.
 
 ## Branch policy
 

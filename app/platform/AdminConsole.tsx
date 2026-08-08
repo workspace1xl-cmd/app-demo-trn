@@ -478,7 +478,8 @@ function DepartmentsPanel({ token }: { token: string }) {
 // Employees
 // ---------------------------------------------------------------------------
 
-type Employee = { id: string; full_name: string; email: string; role: string; is_active: boolean; department_id: string | null; department_name: string | null };
+type Employee = { id: string; full_name: string; email: string; role: string; is_active: boolean; department_id: string | null; department_name: string | null; manager_id: string | null; manager_name: string | null };
+type EmployeeLookup = { id: string; full_name: string };
 
 const ROLE_OPTIONS = [
   { value: "employee", label: "Employee" },
@@ -491,10 +492,16 @@ function EmployeesPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const list = usePagedList<Employee>(token, (page, size, q) => `/api/v1/admin/employees?page=${page}&page_size=${size}${q ? `&q=${encodeURIComponent(q)}` : ""}`, reloadKey);
   const departments = useLookup<Department>(token, "/api/v1/admin/departments");
+  // BUILD PROMPT v5 item A3: unpaginated roster for the manager picker —
+  // the paginated employees list can't be used here since the person a
+  // manager should be set to might be on a different page.
+  const allEmployees = useLookup<EmployeeLookup>(token, "/api/v1/admin/employees/lookup");
   const [modal, setModal] = useState<null | { mode: "create" | "edit"; row?: Employee }>(null);
   const [toast, setToast] = useState("");
 
   const departmentOptions = departments.map((d) => ({ value: d.id, label: d.name }));
+  const managerOptions = (excludeId?: string) =>
+    allEmployees.filter((e) => e.id !== excludeId).map((e) => ({ value: e.id, label: e.full_name }));
 
   const createFields: FieldDef[] = [
     { key: "full_name", label: "Full Name", type: "text", required: true },
@@ -502,11 +509,13 @@ function EmployeesPanel({ token }: { token: string }) {
     { key: "password", label: "Password", type: "password", required: true, minLength: 8, helpText: "At least 8 characters." },
     { key: "role", label: "Role", type: "select", required: true, options: ROLE_OPTIONS },
     { key: "department_id", label: "Department", type: "select", options: departmentOptions },
+    { key: "manager_id", label: "Reports To", type: "select", options: managerOptions(), helpText: "Who this person reports to — drives the Manager Dashboard, not the department." },
   ];
-  const editFields: FieldDef[] = [
+  const editFields = (excludeId: string): FieldDef[] => [
     { key: "full_name", label: "Full Name", type: "text", required: true },
     { key: "role", label: "Role", type: "select", required: true, options: ROLE_OPTIONS },
     { key: "department_id", label: "Department", type: "select", options: departmentOptions },
+    { key: "manager_id", label: "Reports To", type: "select", options: managerOptions(excludeId), helpText: "Who this person reports to — drives the Manager Dashboard, not the department." },
     { key: "is_active", label: "Status", type: "select", required: true, options: [{ value: "true", label: "Active" }, { value: "false", label: "Inactive" }] },
     { key: "password", label: "Reset Password", type: "password", minLength: 8, helpText: "Leave blank to keep the current password." },
   ];
@@ -519,6 +528,7 @@ function EmployeesPanel({ token }: { token: string }) {
         columns={[
           { key: "full_name", label: "Full Name", render: (row) => (<><b>{row.full_name}</b><small>{row.email}</small></>) },
           { key: "department_name", label: "Department" },
+          { key: "manager_name", label: "Reports To", render: (row) => row.manager_name || <span style={{ color: "#8b8f9e" }}>Unassigned</span> },
           { key: "role", label: "Role", render: (row) => <StatusBadge status={row.role} /> },
           { key: "is_active", label: "Status", render: (row) => <StatusBadge status={row.is_active ? "active" : "archived"} /> },
         ]}
@@ -533,8 +543,8 @@ function EmployeesPanel({ token }: { token: string }) {
       {modal && (
         <FormModal
           title={modal.mode === "create" ? "Add Employee" : `Edit ${modal.row?.full_name}`}
-          fields={modal.mode === "create" ? createFields : editFields}
-          initialValues={modal.row ? { full_name: modal.row.full_name, role: modal.row.role, department_id: modal.row.department_id || "", is_active: String(modal.row.is_active) } : { role: "employee" }}
+          fields={modal.mode === "create" ? createFields : editFields(modal.row!.id)}
+          initialValues={modal.row ? { full_name: modal.row.full_name, role: modal.row.role, department_id: modal.row.department_id || "", manager_id: modal.row.manager_id || "", is_active: String(modal.row.is_active) } : { role: "employee" }}
           submitLabel={modal.mode === "create" ? "Create Employee" : "Save Changes"}
           onCancel={() => setModal(null)}
           onSubmit={async (values) => {

@@ -15,23 +15,55 @@ Demo accounts:
 | Role | Email | Password |
 | --- | --- | --- |
 | Employee | `employee@company.com` | `Demo123!` |
+| Manager | `manager@company.com` | `Manager123!` |
 | Administrator | `admin@company.com` | `Admin123!` |
 
 These are demonstration credentials only. Replace seeded users and credentials before a real organisation pilot.
 
 ## What works now
 
-- Database-backed employee and administrator login with expiring server-side sessions
+- Database-backed employee, manager and administrator login with expiring server-side sessions
 - Tenant-scoped dashboard and role-based navigation
 - Complete 22-module induction curriculum with sequential unlocking
 - Quiz submission, scoring, attempts, progress updates and certificate issuance
-- Verified knowledge search across responsibility records, SOPs and training
-- Optional Claude synthesis that answers only from retrieved organisational context
-- Department responsibility matrix with owners, backup, channel, SLA and escalation
-- Ten controlled SOP records with owners, approvers, versions and review dates
+- Verified knowledge search across responsibility records and training, optionally synthesised
+  by Claude and grounded only in retrieved organisational context — plus a persistent
+  AI assistant available from every screen
+- Department responsibility matrix (RACI) with owner, backup, channel, SLA and escalation,
+  and a live force-directed responsibility graph built from that same data
+- A transparent, component-by-component readiness score (training completion, certificate
+  currency, named-ownership coverage) at the individual, team and org level — never a black box
+- Manager dashboard: team readiness, per-member training/overdue status, team-scoped
+  responsibility graph
+- Executive/org health view: readiness trend over time, department-by-department comparison,
+  and an ownership-gap callout naming which departments lack a real owner
+- In-app notification centre for overdue training and upcoming certificate expiry, backed by
+  the same `pg_cron` job that also drives outbound email reminders
+- Milestone and streak recognition on real completion data (no separate points/events system)
+- SOP documents themselves live in SOPGalaxy, not here — OneWork keeps only a plain link on
+  each responsibility record; there is deliberately no in-app SOP repository or workflow
 - Unresolved-question feedback queue and audit events
-- Administrator analytics across users, learning, certificates, ownership and SOPs
+- Administrator analytics across users, learning, certificates and ownership
 - Responsive management blueprint and working application deployed on Vercel
+
+## Known limitations (read before a live demo)
+
+- **Manager Dashboard is department-scoped, not a real reporting hierarchy.** "My team" means
+  "everyone in my department", not "everyone who reports to me" — there is no `manager_id`
+  relationship yet. A manager sharing a department with other managers will see people who
+  don't actually report to them.
+- **Quiz questions are templated, one per module**, with the correct answer always in the same
+  position. They demonstrate the assessment *mechanism*, not real compliance content.
+- **Demo seed data is intentionally sparse.** Depending on when it was last reseeded, RACI rows
+  may show no named owner, the readiness trend may have only a few days of history, and the
+  notification bell may be empty — all of these are honestly computed from real (thin) data,
+  not bugs, but they can make a fresh demo look emptier than the product actually is.
+- **Search is keyword (`ILIKE`) matching, not semantic.** The `pgvector` column and index exist
+  and are ready for real embeddings, but nothing populates or queries them yet — a search that
+  doesn't share a keyword with the source record won't find it even if it's conceptually close.
+- **The floating AI assistant is single-turn retrieval, not a stateful chat.** Each message is
+  answered independently by the same grounded search the Knowledge search screen uses; it does
+  not carry conversational memory between turns beyond what's shown on screen.
 
 ## Architecture
 
@@ -46,12 +78,13 @@ Supabase Edge Function: onework-api
          ▼
 Supabase PostgreSQL
   ├─ users, sessions and departments
-  ├─ activities and controlled SOPs
+  ├─ activities (RACI/ownership; sop_link points out to SOPGalaxy, no SOP content lives here)
   ├─ modules, quizzes, enrollments and certificates
-  ├─ knowledge chunks (pgvector-ready)
+  ├─ readiness_snapshots (daily org readiness history) and notification_outbox
+  ├─ knowledge chunks (pgvector-ready, not yet wired into search — see Known limitations)
   └─ feedback and audit events
          │ optional
-         └─ Claude Messages API for grounded answer synthesis
+         └─ Claude Messages API for grounded answer synthesis (search + AI assistant)
 ```
 
 Direct browser access to application tables is denied by row-level-security policies. The Edge Function authenticates every protected request and applies the signed-in user's `org_id` to every query.

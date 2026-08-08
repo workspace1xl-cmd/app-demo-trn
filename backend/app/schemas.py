@@ -77,11 +77,13 @@ class EmployeeCreate(BaseModel):
     password: str = Field(min_length=8)
     role: str = "employee"
     department_id: str | None = None
+    manager_id: str | None = None
 
 
 class EmployeeUpdate(BaseModel):
     full_name: str | None = None
     department_id: str | None = None
+    manager_id: str | None = None
     role: str | None = None
     is_active: bool | None = None
     password: str | None = Field(default=None, min_length=8)
