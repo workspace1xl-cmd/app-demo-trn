@@ -1647,9 +1647,9 @@ function ContentSection({ token }: { token: string }) {
   const [tab, setTab] = useState<"assets" | "mistakes">("assets");
   return (
     <section>
-      <div className={styles.adminTabs} style={{ borderBottom: "none", marginBottom: 12 }}>
-        <button className={tab === "assets" ? styles.adminTabActive : ""} onClick={() => setTab("assets")}>Documents &amp; Videos</button>
-        <button className={tab === "mistakes" ? styles.adminTabActive : ""} onClick={() => setTab("mistakes")}>Mistake Register</button>
+      <div className={styles.adminSubTabs}>
+        <button type="button" data-active={tab === "assets"} onClick={() => setTab("assets")}>Documents &amp; Videos</button>
+        <button type="button" data-active={tab === "mistakes"} onClick={() => setTab("mistakes")}>Mistake Register</button>
       </div>
       {tab === "assets" ? <ContentLibraryPanel token={token} /> : <MistakeRegisterPanel token={token} />}
     </section>
