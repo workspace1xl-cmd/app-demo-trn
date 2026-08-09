@@ -1247,7 +1247,23 @@ def update_rule(rule_id: str, payload: dict, user: User = Depends(admin_user), d
     if "sop_url" in payload: rule.sop_url = str(payload["sop_url"] or "").strip() or None
     if "sop_label" in payload: rule.sop_label = str(payload["sop_label"] or "").strip() or None
     if "attachment_asset_id" in payload: rule.attachment_asset_id = payload["attachment_asset_id"] or None
-    audit(db, user, "rule.update", "rule", rule.id); db.commit()
+    # QA REMEDIATION BLOCKER 4: mirrors the Edge Function — editing a
+    # rule through this route (title, category, or now body, previously
+    # missing from the Edit dialog entirely) creates a new version and,
+    # since read tracking is keyed by rule_version_id, genuinely clears
+    # everyone's read status. The standalone New Version route below is
+    # unchanged, for a content-only publish.
+    new_version_id = None
+    if "body" in payload:
+        new_body = str(payload["body"] or "").strip()
+        if not new_body:
+            raise HTTPException(400, {"detail": "Rule content is required.", "field": "body"})
+        latest = db.scalar(select(RuleVersion).where(RuleVersion.rule_id == rule.id).order_by(RuleVersion.version.desc()))
+        version = RuleVersion(rule_id=rule.id, version=(latest.version if latest else 0) + 1, body=new_body, created_by=user.id)
+        db.add(version); db.flush()
+        rule.published_version_id = version.id
+        new_version_id = version.id
+    audit(db, user, "rule.update", "rule", rule.id, {"new_version_id": new_version_id} if new_version_id else None); db.commit()
     return {"id": rule.id, "title": rule.title, "department_id": rule.department_id, "category": rule.category,
             "is_mandatory": rule.is_mandatory, "status": rule.status, "published_version_id": rule.published_version_id,
             "sop_url": rule.sop_url, "sop_label": rule.sop_label, "attachment_asset_id": rule.attachment_asset_id}

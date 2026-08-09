@@ -2485,7 +2485,13 @@ function RulesListTab({ token }: { token: string }) {
     // BUILD PROMPT v5 BLOCK I: a real attached asset — different from the
     // SOPGalaxy Link above, which is a plain external reference.
     { key: "attachment_asset_id", label: "Attachment (video/audio/image/document)", type: "select", options: attachmentOptions.map((a) => ({ value: a.id, label: `${a.title} (${a.kind})` })), helpText: "Leave blank if this rule has no attached media." },
-    ...(modal?.mode === "create" ? [{ key: "body", label: "Rule Content", type: "textarea" as const, required: true }] : []),
+    // QA REMEDIATION BLOCKER 4: previously only present on Create — the
+    // Edit dialog had no body field at all, so an admin editing a rule's
+    // title/category couldn't touch its actual content here, and (before
+    // this fix) that edit didn't version or reset anyone's read status
+    // either. Now present on both, pre-filled with the currently
+    // published body on edit; saving always creates a new version.
+    { key: "body", label: "Rule Content", type: "textarea", required: true, helpText: modal?.mode === "edit" ? "Saving any change here (including just the title) publishes a new version and clears everyone's read status for this rule." : undefined },
   ];
 
   if (loading) return <div className={styles.loading}>Synchronising verified data…</div>;
@@ -2516,14 +2522,14 @@ function RulesListTab({ token }: { token: string }) {
         <FormModal
           title={modal.mode === "create" ? "Add Rule" : "Edit Rule"}
           fields={ruleFields}
-          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory), sop_url: modal.row.sop_url || "", sop_label: modal.row.sop_label || "", attachment_asset_id: modal.row.attachment_asset_id || "" } : { is_mandatory: "true" }}
+          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory), sop_url: modal.row.sop_url || "", sop_label: modal.row.sop_label || "", attachment_asset_id: modal.row.attachment_asset_id || "", body: modal.row.published_version?.body || "" } : { is_mandatory: "true" }}
           submitLabel={modal.mode === "create" ? "Add Rule" : "Save Changes"}
           onCancel={() => setModal(null)}
           onSubmit={async (values) => {
             const payload = { ...values, is_mandatory: values.is_mandatory === "true" };
             if (modal.mode === "create") await submitJson("/api/v1/admin/rules", token, "POST", payload);
             else await submitJson(`/api/v1/admin/rules/${modal.row.id}`, token, "PATCH", payload);
-            setToast(modal.mode === "create" ? "Rule added successfully." : "Rule updated successfully.");
+            setToast(modal.mode === "create" ? "Rule added successfully." : "Rule updated successfully. A new version was published — employees who already acknowledged it will need to re-acknowledge.");
             setTimeout(() => setToast(""), 3000);
             setModal(null); load();
           }}
