@@ -84,7 +84,12 @@ type DashboardData = { user: { name: string }; training: { percent: number; comp
 // searchable/browsable knowledge entry — not just delivered back to the
 // original submitter as a notification.
 type ResolvedQuery = { id: string; query: string; resolution: string; resolved_at: string | null };
-type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; resolved_queries?: ResolvedQuery[]; unresolved?: boolean };
+// QA REMEDIATION BLOCKER 8: leadership/HR onboarding messages (welcome,
+// founder, MD, co-founder, management, HR, HR training video) — real
+// content_assets rows, now indexed and returned by Knowledge Search
+// like every other verified source.
+type SearchMessage = { id: string; title: string; description: string | null; message_subtype: string; url: string | null };
+type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; resolved_queries?: ResolvedQuery[]; messages?: SearchMessage[]; unresolved?: boolean };
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
 type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; sop_url?: string | null; sop_label?: string | null; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
 
@@ -127,6 +132,16 @@ function formatDate(value?: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+// QA REMEDIATION BLOCKER 8: same label set as the admin console's
+// messageSubtypeLabel — kept as its own small copy since AdminConsole
+// and PlatformApp aren't otherwise coupled to each other.
+const SEARCH_MESSAGE_SUBTYPE_LABELS: Record<string, string> = {
+  welcome: "Welcome Message", founder: "Founder", md: "Managing Director",
+  co_founder: "Co-Founder", management: "Management", hr: "HR", hr_training_video: "HR Training Video",
+};
+function searchMessageSubtypeLabel(value: string): string {
+  return SEARCH_MESSAGE_SUBTYPE_LABELS[value] || value;
 }
 function youtubeEmbedUrl(url: string): string | null {
   const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([\w-]{6,})/);
@@ -1243,6 +1258,21 @@ export default function WorkingPlatform() {
                         <small>Previously answered{rq.resolved_at ? ` · ${formatDate(rq.resolved_at)}` : ""}</small>
                       </div>
                       <span>{rq.resolution}</span>
+                    </article>
+                  ))}
+                  {/* QA REMEDIATION BLOCKER 8: leadership/HR onboarding
+                      messages, now genuinely searchable/browsable. */}
+                  {searchData.messages?.map((msg) => (
+                    <article key={msg.id}>
+                      <div>
+                        <b>{msg.title}</b>
+                        <small>{searchMessageSubtypeLabel(msg.message_subtype)}</small>
+                      </div>
+                      {msg.url && (
+                        <a href={msg.url} target="_blank" rel="noopener noreferrer">
+                          Watch / open →
+                        </a>
+                      )}
                     </article>
                   ))}
                 </section>
