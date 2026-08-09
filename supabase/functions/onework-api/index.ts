@@ -266,6 +266,55 @@ Deno.serve(async (req) => {
     }
 
     // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK B: employee-facing onboarding journey. Status
+    // is computed on every read from enrollments + employee_item_progress
+    // — there is no cached "onboarding complete" flag anywhere to drift
+    // out of sync. A stage is "completed" once every item in it is
+    // completed; a stage is "available" once every earlier stage is
+    // completed (or it's the first stage); otherwise it's "locked". The
+    // whole journey is "completed" once every stage is.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/onboarding/journey" && req.method === "GET") {
+      const [{ data: stages, error }, { data: items }, { data: itemProgress }, { data: enrollments }] = await Promise.all([
+        supabase.from("onboarding_stages").select("id,name,description,sequence").eq("org_id", user.org_id).order("sequence"),
+        supabase.from("onboarding_stage_items").select("id,stage_id,item_type,training_module_id,title,description,sequence,onboarding_stages!inner(org_id)").eq("onboarding_stages.org_id", user.org_id).order("sequence"),
+        supabase.from("employee_item_progress").select("item_id,completed_at").eq("user_id", user.id),
+        supabase.from("enrollments").select("module_id,status").eq("org_id", user.org_id).eq("user_id", user.id),
+      ]);
+      if (error) throw error;
+      const ackByItem = new Map((itemProgress || []).map((p) => [p.item_id, p.completed_at]));
+      const completedModuleIds = new Set((enrollments || []).filter((e) => e.status === "completed").map((e) => e.module_id));
+      const itemsByStage = new Map<string, any[]>();
+      for (const raw of items || []) {
+        const { onboarding_stages, ...item } = raw as any;
+        const completed = item.item_type === "training_module" ? completedModuleIds.has(item.training_module_id) : ackByItem.has(item.id);
+        if (!itemsByStage.has(item.stage_id)) itemsByStage.set(item.stage_id, []);
+        itemsByStage.get(item.stage_id)!.push({ ...item, completed, completed_at: item.item_type === "training_module" ? null : ackByItem.get(item.id) || null });
+      }
+      let priorComplete = true;
+      const shaped = (stages || []).map((s) => {
+        const stageItems = itemsByStage.get(s.id) || [];
+        const stageComplete = stageItems.length > 0 && stageItems.every((i) => i.completed);
+        const status = stageComplete ? "completed" : priorComplete ? "available" : "locked";
+        priorComplete = priorComplete && stageComplete;
+        return { ...s, status, items: stageItems };
+      });
+      const journeyComplete = shaped.length > 0 && shaped.every((s) => s.status === "completed");
+      return json({ stages: shaped, journey_complete: journeyComplete });
+    }
+    const journeyAckMatch = path.match(/^\/api\/v1\/onboarding\/journey\/items\/([^/]+)\/complete$/);
+    if (journeyAckMatch && req.method === "POST") {
+      const { data: item } = await supabase.from("onboarding_stage_items").select("id,item_type,onboarding_stages!inner(org_id)").eq("id", journeyAckMatch[1]).eq("onboarding_stages.org_id", user.org_id).maybeSingle();
+      if (!item) return json({ detail: "This onboarding item couldn't be found." }, 404);
+      if (item.item_type === "training_module") return json({ detail: "This item completes automatically once you finish the training module." }, 400);
+      // Idempotent: re-clicking "mark done" after it's already recorded is
+      // a no-op, not an error — same pattern as Block A's acknowledge route.
+      const { error } = await supabase.from("employee_item_progress").upsert({ user_id: user.id, item_id: item.id }, { onConflict: "user_id,item_id", ignoreDuplicates: true });
+      if (error) throw error;
+      return json({ ok: true });
+    }
+
+    // -------------------------------------------------------------------
     // Manager dashboard (BUILD PROMPT v4 item 4) — RBAC-scoped to "my
     // team", reusing department_id as the reporting-line signal since
     // that's the only one that already exists on app_users; there is no
@@ -725,6 +774,95 @@ Deno.serve(async (req) => {
       if (error) throw error;
       await audit(user, "preboarding_content.update", "organization", user.org_id, { blocks: rows.map((r) => r.block_key) });
       return json({ ok: true });
+    }
+
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK B: admin side — configure the stage-gated
+    // onboarding journey. Stages are returned with their items nested
+    // (one round trip covers the whole config screen); item CRUD is
+    // scoped through the parent stage's org_id so an admin can never
+    // touch another org's items even by guessing an id.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/admin/onboarding-stages" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const [{ data: stages, error }, { data: items }] = await Promise.all([
+        supabase.from("onboarding_stages").select("id,name,description,sequence").eq("org_id", user.org_id).order("sequence"),
+        supabase.from("onboarding_stage_items").select("id,stage_id,item_type,training_module_id,title,description,sequence,onboarding_stages!inner(org_id)").eq("onboarding_stages.org_id", user.org_id).order("sequence"),
+      ]);
+      if (error) throw error;
+      const itemsByStage = new Map<string, unknown[]>();
+      for (const item of items || []) {
+        const { onboarding_stages, ...rest } = item as any;
+        if (!itemsByStage.has(rest.stage_id)) itemsByStage.set(rest.stage_id, []);
+        itemsByStage.get(rest.stage_id)!.push(rest);
+      }
+      return json((stages || []).map((s) => ({ ...s, items: itemsByStage.get(s.id) || [] })));
+    }
+    if (path === "/api/v1/admin/onboarding-stages" && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      if (!body.name?.trim()) return fieldError("name", "Stage Name is required.");
+      if (!Number.isInteger(body.sequence)) return fieldError("sequence", "Sequence is required.");
+      const { data, error } = await supabase.from("onboarding_stages").insert({ org_id: user.org_id, name: body.name.trim(), description: body.description?.trim() || "", sequence: body.sequence }).select().single();
+      if (error) return json({ detail: error.message?.includes("duplicate") ? "A stage already exists at that sequence position." : "Could not create the stage." }, 409);
+      await audit(user, "onboarding_stage.create", "onboarding_stage", data.id); return json(data, 201);
+    }
+    const stageMatch = path.match(/^\/api\/v1\/admin\/onboarding-stages\/([^/]+)$/);
+    if (stageMatch && req.method === "PATCH") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json(); const patch: Record<string, unknown> = {};
+      if (body.name !== undefined) patch.name = String(body.name).trim();
+      if (body.description !== undefined) patch.description = String(body.description).trim();
+      if (body.sequence !== undefined) patch.sequence = body.sequence;
+      const { data, error } = await supabase.from("onboarding_stages").update(patch).eq("id", stageMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
+      if (error) return json({ detail: "A stage already exists at that sequence position." }, 409);
+      if (!data) return json({ detail: "Stage not found." }, 404);
+      await audit(user, "onboarding_stage.update", "onboarding_stage", data.id); return json(data);
+    }
+    if (stageMatch && req.method === "DELETE") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data, error } = await supabase.from("onboarding_stages").delete().eq("id", stageMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
+      if (error) throw error;
+      if (!data) return json({ detail: "Stage not found." }, 404);
+      await audit(user, "onboarding_stage.delete", "onboarding_stage", stageMatch[1]); return json({ ok: true });
+    }
+    const stageItemsMatch = path.match(/^\/api\/v1\/admin\/onboarding-stages\/([^/]+)\/items$/);
+    if (stageItemsMatch && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data: stage } = await supabase.from("onboarding_stages").select("id").eq("id", stageItemsMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      if (!stage) return json({ detail: "Stage not found." }, 404);
+      const body = await req.json();
+      if (!["training_module", "content_block", "custom_task"].includes(body.item_type)) return fieldError("item_type", "Choose a valid item type.");
+      if (!body.title?.trim()) return fieldError("title", "Title is required.");
+      if (!Number.isInteger(body.sequence)) return fieldError("sequence", "Sequence is required.");
+      if (body.item_type === "training_module" && !body.training_module_id) return fieldError("training_module_id", "Select a Training Module.");
+      const { data, error } = await supabase.from("onboarding_stage_items").insert({
+        stage_id: stage.id, item_type: body.item_type,
+        training_module_id: body.item_type === "training_module" ? body.training_module_id : null,
+        title: body.title.trim(), description: body.description?.trim() || "", sequence: body.sequence,
+      }).select().single();
+      if (error) return json({ detail: error.message?.includes("duplicate") ? "An item already exists at that sequence position." : "Could not create the item." }, 409);
+      await audit(user, "onboarding_stage_item.create", "onboarding_stage_item", data.id); return json(data, 201);
+    }
+    const stageItemMatch = path.match(/^\/api\/v1\/admin\/onboarding-stage-items\/([^/]+)$/);
+    if (stageItemMatch && (req.method === "PATCH" || req.method === "DELETE")) {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      // Scope through the parent stage's org_id — this table has no
+      // org_id column of its own.
+      const { data: existing } = await supabase.from("onboarding_stage_items").select("id,stage_id,onboarding_stages!inner(org_id)").eq("id", stageItemMatch[1]).eq("onboarding_stages.org_id", user.org_id).maybeSingle();
+      if (!existing) return json({ detail: "Item not found." }, 404);
+      if (req.method === "DELETE") {
+        const { error } = await supabase.from("onboarding_stage_items").delete().eq("id", stageItemMatch[1]);
+        if (error) throw error;
+        await audit(user, "onboarding_stage_item.delete", "onboarding_stage_item", stageItemMatch[1]); return json({ ok: true });
+      }
+      const body = await req.json(); const patch: Record<string, unknown> = {};
+      if (body.title !== undefined) patch.title = String(body.title).trim();
+      if (body.description !== undefined) patch.description = String(body.description).trim();
+      if (body.sequence !== undefined) patch.sequence = body.sequence;
+      const { data, error } = await supabase.from("onboarding_stage_items").update(patch).eq("id", stageItemMatch[1]).select().maybeSingle();
+      if (error) return json({ detail: "An item already exists at that sequence position." }, 409);
+      await audit(user, "onboarding_stage_item.update", "onboarding_stage_item", data.id); return json(data);
     }
 
     if (path === "/api/v1/admin/employees" && req.method === "GET") {

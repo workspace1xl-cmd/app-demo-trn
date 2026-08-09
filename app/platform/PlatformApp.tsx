@@ -41,10 +41,11 @@ export type AdminSection =
   | "training"
   | "assignments"
   | "content"
+  | "journey"
   | "feedback"
   | "audit"
   | "exec";
-const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "candidates", "matrix", "training", "assignments", "content", "feedback", "audit", "exec"];
+const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "candidates", "matrix", "training", "assignments", "content", "journey", "feedback", "audit", "exec"];
 // Ten flat tabs read as a wall of text — grouped here into 5 clusters
 // (icons + labels, current-section highlighted, sized to the "5-8
 // top-level items" guidance) purely as a navigation reorganisation.
@@ -53,7 +54,7 @@ const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments
 const ADMIN_GROUPS: { key: string; label: string; icon: string; sections: [AdminSection, string][] }[] = [
   { key: "insights", label: "Insights", icon: "◈", sections: [["overview", "Overview"], ["exec", "Exec View"]] },
   { key: "people", label: "People", icon: "◍", sections: [["employees", "Employees"], ["departments", "Departments"], ["candidates", "Candidates"]] },
-  { key: "learning", label: "Learning", icon: "◎", sections: [["training", "Training & Quiz Builder"], ["assignments", "Assignments"], ["content", "Content Library"]] },
+  { key: "learning", label: "Learning", icon: "◎", sections: [["training", "Training & Quiz Builder"], ["assignments", "Assignments"], ["content", "Content Library"], ["journey", "Onboarding Journey"]] },
   { key: "ownership", label: "Ownership", icon: "⬡", sections: [["matrix", "Responsibility Matrix"]] },
   { key: "governance", label: "Governance", icon: "◉", sections: [["feedback", "Feedback Queue"], ["audit", "Audit Log"]] },
 ];
@@ -79,6 +80,14 @@ type DashboardData = { user: { name: string }; training: { percent: number; comp
 type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; unresolved?: boolean };
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
 type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
+
+// BUILD PROMPT v5 BLOCK B: onboarding journey. Fetched separately from the
+// standard DashboardData above — the two are independent screens (the
+// journey replaces the dashboard's hero while incomplete, then steps aside
+// permanently once complete), not one payload with two shapes.
+type JourneyItem = { id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; title: string; description: string; sequence: number; completed: boolean; completed_at: string | null };
+type JourneyStage = { id: string; name: string; description: string; sequence: number; status: "completed" | "available" | "locked"; items: JourneyItem[] };
+type Journey = { stages: JourneyStage[]; journey_complete: boolean };
 
 // Single date format for the whole app. Before this, Certificates showed
 // raw ISO ("2026-08-07"), the admin console showed "07 Aug 2026", and the
@@ -202,6 +211,8 @@ export default function WorkingPlatform() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [data, setData] = useState<PlatformData>(null);
+  const [journey, setJourney] = useState<Journey | null>(null);
+  const [journeyBusyId, setJourneyBusyId] = useState<string | null>(null);
   const [query, setQuery] = useState("leave");
   const [toast, setToast] = useState("");
   const [showSignup, setShowSignup] = useState(false);
@@ -413,6 +424,31 @@ export default function WorkingPlatform() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, [session, view, reloadKey]);
+
+  // BUILD PROMPT v5 BLOCK B: fetched independently of `data` above — admins
+  // never see the onboarding home. `completeJourneyItem` below re-fetches
+  // itself after a successful "mark done", so this effect doesn't need
+  // journeyBusyId as a dependency (that would double-fetch on every click).
+  useEffect(() => {
+    if (!session || view !== "dashboard" || session.user.role === "admin") return;
+    request<Journey>("/api/v1/onboarding/journey", session.access_token)
+      .then(setJourney)
+      .catch(() => setJourney(null));
+  }, [session, view, reloadKey]);
+
+  async function completeJourneyItem(itemId: string) {
+    if (!session) return;
+    setJourneyBusyId(itemId);
+    try {
+      await request(`/api/v1/onboarding/journey/items/${itemId}/complete`, session.access_token, { method: "POST" });
+      const next = await request<Journey>("/api/v1/onboarding/journey", session.access_token);
+      setJourney(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not record that as done.");
+    } finally {
+      setJourneyBusyId(null);
+    }
+  }
 
   // `overrideEmail`/`overridePassword` let the one-click role buttons below
   // log straight in — "choose Manager, you're in" — instead of filling the
@@ -788,7 +824,68 @@ export default function WorkingPlatform() {
           )}
           {busy && data && <div className={styles.syncingBadge}>Syncing…</div>}
           {error && <div className={styles.error}>{error}</div>}
-          {dashboardData && (
+          {/* BUILD PROMPT v5 BLOCK B: stage-gated onboarding home. Replaces
+              the standard dashboard hero entirely while any stage remains
+              incomplete; the moment journey_complete flips true (server-
+              computed, nothing cached client-side) this stops rendering and
+              the ordinary dashboard below takes over on its own — no
+              separate "finish onboarding" action needed. */}
+          {journey && !journey.journey_complete && journey.stages.length > 0 && (
+            <section className={styles.journeyShell}>
+              <div className={styles.journeyIntro}>
+                <span>YOUR ONBOARDING</span>
+                <h2>Let&apos;s get you fully set up.</h2>
+                <p>Work through each stage in order — later stages unlock once the one before it is done.</p>
+              </div>
+              <ol className={styles.journeyStages}>
+                {journey.stages.map((stage) => (
+                  <li key={stage.id} className={styles.journeyStage} data-status={stage.status}>
+                    <div className={styles.journeyStageHead}>
+                      <span className={styles.journeyStageMark}>
+                        {stage.status === "completed" ? "✓" : stage.status === "locked" ? "🔒" : stage.sequence}
+                      </span>
+                      <div>
+                        <h3>{stage.name}</h3>
+                        {stage.description && <p>{stage.description}</p>}
+                      </div>
+                    </div>
+                    {stage.status !== "locked" && (
+                      <ul className={styles.journeyItems}>
+                        {stage.items.map((item) => (
+                          <li key={item.id} className={styles.journeyItem} data-done={item.completed}>
+                            <span className={styles.journeyItemCheck}>{item.completed ? "✓" : "○"}</span>
+                            <div className={styles.journeyItemBody}>
+                              <b>{item.title}</b>
+                              {item.description && <span>{item.description}</span>}
+                              {item.item_type === "training_module" && !item.completed && (
+                                <button type="button" className={styles.journeyLinkBtn} onClick={() => goToView("training")}>
+                                  Go to My learning →
+                                </button>
+                              )}
+                            </div>
+                            {item.item_type !== "training_module" && !item.completed && (
+                              <button
+                                type="button"
+                                className={styles.journeyDoneBtn}
+                                disabled={journeyBusyId === item.id}
+                                onClick={() => completeJourneyItem(item.id)}
+                              >
+                                {journeyBusyId === item.id ? "Saving…" : "Mark as done"}
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {stage.status === "locked" && (
+                      <p className={styles.journeyLockedNote}>Complete the stage above to unlock this.</p>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
+          {dashboardData && (!journey || journey.journey_complete || journey.stages.length === 0) && (
             <>
               <section className={styles.hero}>
                 <div>

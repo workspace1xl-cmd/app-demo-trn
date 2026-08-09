@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
-from .models import Activity, AuditEvent, Candidate, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, OrgPreboardingContent, Organization, PreboardingAcknowledgment, QuizAttempt, QuizQuestion, ReadinessSnapshot, TrainingModule, User
+from .models import Activity, AuditEvent, Candidate, Certificate, Department, EmployeeItemProgress, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, OnboardingStage, OnboardingStageItem, OrgPreboardingContent, Organization, PreboardingAcknowledgment, QuizAttempt, QuizQuestion, ReadinessSnapshot, TrainingModule, User
 from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SearchRequest, TokenResponse
 from .security import create_token, hash_password, verify_password
 from .seed import MODULES, seed_database
@@ -282,6 +282,54 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
     if currency is not None:
         components.append({"key": "cert_currency", "label": "Certificates current (not expired)", "percent": currency})
     return {"user": {"name": user.full_name, "role": user.role}, "training": {"completed": complete, "total": total, "percent": training_percent}, "certificates": len(certificates), "points": sum((item.best_score or 0) * 5 for item in enrollments), "open_actions": sum(item.status in {"in_progress", "assigned"} for item in enrollments), "readiness": _score_from_components(components), "gamification": _build_gamification(complete, total, enrollments)}
+
+
+# -----------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK B: employee-facing onboarding journey. Status is
+# computed on every read from Enrollment + EmployeeItemProgress — no
+# cached "onboarding complete" flag anywhere to drift out of sync. Mirrors
+# the Edge Function's /api/v1/onboarding/journey routes exactly.
+# -----------------------------------------------------------------------
+@app.get("/api/v1/onboarding/journey")
+def onboarding_journey(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    stages = db.scalars(select(OnboardingStage).where(OnboardingStage.org_id == user.org_id).order_by(OnboardingStage.sequence)).all()
+    stage_ids = [s.id for s in stages]
+    items = db.scalars(select(OnboardingStageItem).where(OnboardingStageItem.stage_id.in_(stage_ids)).order_by(OnboardingStageItem.sequence)).all() if stage_ids else []
+    acks = {p.item_id: p.completed_at for p in db.scalars(select(EmployeeItemProgress).where(EmployeeItemProgress.user_id == user.id)).all()}
+    completed_module_ids = {e.module_id for e in db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.status == "completed")).all()}
+    items_by_stage: dict[str, list] = {}
+    for item in items:
+        completed = (item.training_module_id in completed_module_ids) if item.item_type == "training_module" else (item.id in acks)
+        items_by_stage.setdefault(item.stage_id, []).append({
+            "id": item.id, "item_type": item.item_type, "training_module_id": item.training_module_id,
+            "title": item.title, "description": item.description, "sequence": item.sequence,
+            "completed": completed, "completed_at": None if item.item_type == "training_module" else (acks[item.id].isoformat() if item.id in acks else None),
+        })
+    prior_complete = True
+    shaped = []
+    for s in stages:
+        stage_items = items_by_stage.get(s.id, [])
+        stage_complete = bool(stage_items) and all(i["completed"] for i in stage_items)
+        stage_status = "completed" if stage_complete else ("available" if prior_complete else "locked")
+        prior_complete = prior_complete and stage_complete
+        shaped.append({"id": s.id, "name": s.name, "description": s.description, "sequence": s.sequence, "status": stage_status, "items": stage_items})
+    journey_complete = bool(shaped) and all(s["status"] == "completed" for s in shaped)
+    return {"stages": shaped, "journey_complete": journey_complete}
+
+
+@app.post("/api/v1/onboarding/journey/items/{item_id}/complete")
+def complete_onboarding_item(item_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    item = _get_stage_item_for_org(db, item_id, user.org_id)
+    if not item:
+        raise HTTPException(404, "This onboarding item couldn't be found.")
+    if item.item_type == "training_module":
+        raise HTTPException(400, "This item completes automatically once you finish the training module.")
+    # Idempotent: re-clicking "mark done" after it's already recorded is a
+    # no-op, not an error — same pattern as Block A's acknowledge route.
+    if not db.scalar(select(EmployeeItemProgress).where(EmployeeItemProgress.user_id == user.id, EmployeeItemProgress.item_id == item.id)):
+        db.add(EmployeeItemProgress(user_id=user.id, item_id=item.id))
+        db.commit()
+    return {"ok": True}
 
 
 # -----------------------------------------------------------------------
@@ -828,6 +876,131 @@ def update_preboarding_content(payload: dict, user: User = Depends(admin_user), 
         else:
             db.add(OrgPreboardingContent(org_id=user.org_id, block_key=key, body=str(payload[key])))
     audit(db, user, "preboarding_content.update", "organization", user.org_id, {"blocks": keys}); db.commit()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK B: admin side — configure the stage-gated onboarding
+# journey. Mirrors the Edge Function's onboarding-stages routes exactly.
+# ---------------------------------------------------------------------------
+def _stage_item_dict(item: OnboardingStageItem) -> dict:
+    return {"id": item.id, "stage_id": item.stage_id, "item_type": item.item_type, "training_module_id": item.training_module_id,
+            "title": item.title, "description": item.description, "sequence": item.sequence}
+
+
+@app.get("/api/v1/admin/onboarding-stages")
+def list_onboarding_stages(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stages = db.scalars(select(OnboardingStage).where(OnboardingStage.org_id == user.org_id).order_by(OnboardingStage.sequence)).all()
+    stage_ids = [s.id for s in stages]
+    items = db.scalars(select(OnboardingStageItem).where(OnboardingStageItem.stage_id.in_(stage_ids)).order_by(OnboardingStageItem.sequence)).all() if stage_ids else []
+    items_by_stage: dict[str, list] = {}
+    for item in items:
+        items_by_stage.setdefault(item.stage_id, []).append(_stage_item_dict(item))
+    return [{"id": s.id, "name": s.name, "description": s.description, "sequence": s.sequence, "items": items_by_stage.get(s.id, [])} for s in stages]
+
+
+@app.post("/api/v1/admin/onboarding-stages", status_code=201)
+def create_onboarding_stage(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    name = str(payload.get("name") or "").strip()
+    sequence = payload.get("sequence")
+    if not name:
+        raise HTTPException(400, {"detail": "Stage Name is required.", "field": "name"})
+    if not isinstance(sequence, int):
+        raise HTTPException(400, {"detail": "Sequence is required.", "field": "sequence"})
+    if db.scalar(select(OnboardingStage).where(OnboardingStage.org_id == user.org_id, OnboardingStage.sequence == sequence)):
+        raise HTTPException(409, "A stage already exists at that sequence position.")
+    stage = OnboardingStage(org_id=user.org_id, name=name, description=str(payload.get("description") or "").strip(), sequence=sequence)
+    db.add(stage); db.flush()
+    audit(db, user, "onboarding_stage.create", "onboarding_stage", stage.id); db.commit()
+    return {"id": stage.id, "name": stage.name, "description": stage.description, "sequence": stage.sequence}
+
+
+@app.patch("/api/v1/admin/onboarding-stages/{stage_id}")
+def update_onboarding_stage(stage_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stage = db.scalar(select(OnboardingStage).where(OnboardingStage.id == stage_id, OnboardingStage.org_id == user.org_id))
+    if not stage:
+        raise HTTPException(404, "Stage not found.")
+    if "sequence" in payload and payload["sequence"] != stage.sequence:
+        if db.scalar(select(OnboardingStage).where(OnboardingStage.org_id == user.org_id, OnboardingStage.sequence == payload["sequence"])):
+            raise HTTPException(409, "A stage already exists at that sequence position.")
+        stage.sequence = payload["sequence"]
+    if "name" in payload: stage.name = str(payload["name"]).strip()
+    if "description" in payload: stage.description = str(payload["description"]).strip()
+    audit(db, user, "onboarding_stage.update", "onboarding_stage", stage.id); db.commit()
+    return {"id": stage.id, "name": stage.name, "description": stage.description, "sequence": stage.sequence}
+
+
+@app.delete("/api/v1/admin/onboarding-stages/{stage_id}")
+def delete_onboarding_stage(stage_id: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stage = db.scalar(select(OnboardingStage).where(OnboardingStage.id == stage_id, OnboardingStage.org_id == user.org_id))
+    if not stage:
+        raise HTTPException(404, "Stage not found.")
+    item_ids = [i.id for i in db.scalars(select(OnboardingStageItem).where(OnboardingStageItem.stage_id == stage.id)).all()]
+    if item_ids:
+        db.query(EmployeeItemProgress).filter(EmployeeItemProgress.item_id.in_(item_ids)).delete(synchronize_session=False)
+        db.query(OnboardingStageItem).filter(OnboardingStageItem.stage_id == stage.id).delete(synchronize_session=False)
+    db.delete(stage)
+    audit(db, user, "onboarding_stage.delete", "onboarding_stage", stage_id); db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/onboarding-stages/{stage_id}/items", status_code=201)
+def create_onboarding_stage_item(stage_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stage = db.scalar(select(OnboardingStage).where(OnboardingStage.id == stage_id, OnboardingStage.org_id == user.org_id))
+    if not stage:
+        raise HTTPException(404, "Stage not found.")
+    item_type = payload.get("item_type")
+    if item_type not in ("training_module", "content_block", "custom_task"):
+        raise HTTPException(400, {"detail": "Choose a valid item type.", "field": "item_type"})
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, {"detail": "Title is required.", "field": "title"})
+    sequence = payload.get("sequence")
+    if not isinstance(sequence, int):
+        raise HTTPException(400, {"detail": "Sequence is required.", "field": "sequence"})
+    training_module_id = payload.get("training_module_id") if item_type == "training_module" else None
+    if item_type == "training_module" and not training_module_id:
+        raise HTTPException(400, {"detail": "Select a Training Module.", "field": "training_module_id"})
+    if db.scalar(select(OnboardingStageItem).where(OnboardingStageItem.stage_id == stage.id, OnboardingStageItem.sequence == sequence)):
+        raise HTTPException(409, "An item already exists at that sequence position.")
+    item = OnboardingStageItem(stage_id=stage.id, item_type=item_type, training_module_id=training_module_id,
+                                title=title, description=str(payload.get("description") or "").strip(), sequence=sequence)
+    db.add(item); db.flush()
+    audit(db, user, "onboarding_stage_item.create", "onboarding_stage_item", item.id); db.commit()
+    return _stage_item_dict(item)
+
+
+def _get_stage_item_for_org(db: Session, item_id: str, org_id: str) -> OnboardingStageItem | None:
+    item = db.scalar(select(OnboardingStageItem).where(OnboardingStageItem.id == item_id))
+    if not item:
+        return None
+    stage = db.scalar(select(OnboardingStage).where(OnboardingStage.id == item.stage_id, OnboardingStage.org_id == org_id))
+    return item if stage else None
+
+
+@app.patch("/api/v1/admin/onboarding-stage-items/{item_id}")
+def update_onboarding_stage_item(item_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = _get_stage_item_for_org(db, item_id, user.org_id)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    if "sequence" in payload and payload["sequence"] != item.sequence:
+        if db.scalar(select(OnboardingStageItem).where(OnboardingStageItem.stage_id == item.stage_id, OnboardingStageItem.sequence == payload["sequence"])):
+            raise HTTPException(409, "An item already exists at that sequence position.")
+        item.sequence = payload["sequence"]
+    if "title" in payload: item.title = str(payload["title"]).strip()
+    if "description" in payload: item.description = str(payload["description"]).strip()
+    audit(db, user, "onboarding_stage_item.update", "onboarding_stage_item", item.id); db.commit()
+    return _stage_item_dict(item)
+
+
+@app.delete("/api/v1/admin/onboarding-stage-items/{item_id}")
+def delete_onboarding_stage_item(item_id: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = _get_stage_item_for_org(db, item_id, user.org_id)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    db.query(EmployeeItemProgress).filter(EmployeeItemProgress.item_id == item.id).delete(synchronize_session=False)
+    db.delete(item)
+    audit(db, user, "onboarding_stage_item.delete", "onboarding_stage_item", item_id); db.commit()
     return {"ok": True}
 
 

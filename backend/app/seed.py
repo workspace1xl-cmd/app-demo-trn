@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, OrgPreboardingContent, Organization, QuizQuestion, ReadinessSnapshot, TrainingModule, User
+from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, OnboardingStage, OnboardingStageItem, OrgPreboardingContent, Organization, QuizQuestion, ReadinessSnapshot, TrainingModule, User
 from .security import hash_password
 
 
@@ -166,4 +166,13 @@ def seed_database(db: Session) -> None:
         ("expectations_from_us", "You can expect a structured onboarding path, a named point of contact for every question, and transparency about how your role fits the wider organisation."),
     ]:
         db.add(OrgPreboardingContent(org_id=org.id, block_key=block_key, body=body))
+    # BUILD PROMPT v5 BLOCK B: default 3-stage onboarding journey, matching
+    # the Supabase seed exactly so both stacks demo identically.
+    stage_1 = OnboardingStage(org_id=org.id, name="Getting started", description="The basics before anything else.", sequence=1)
+    stage_2 = OnboardingStage(org_id=org.id, name="Learn the ropes", description="Complete your first assigned training.", sequence=2)
+    stage_3 = OnboardingStage(org_id=org.id, name="You're set", description="Final housekeeping before you're fully onboarded.", sequence=3)
+    db.add_all([stage_1, stage_2, stage_3]); db.flush()
+    db.add(OnboardingStageItem(stage_id=stage_1.id, item_type="custom_task", title="Set up your workstation", description="Confirm your laptop, email and access badges are ready.", sequence=1))
+    db.add(OnboardingStageItem(stage_id=stage_2.id, item_type="training_module", training_module_id=modules[0].id, title=modules[0].title, description="Complete this to move on to the next stage.", sequence=1))
+    db.add(OnboardingStageItem(stage_id=stage_3.id, item_type="custom_task", title="Meet your manager", description="Have a short introductory call with your manager.", sequence=1))
     db.commit()
