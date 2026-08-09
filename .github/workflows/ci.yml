@@ -32,3 +32,4 @@ jobs:
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_api.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_admin.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_signup.py -q
+      - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_department_scoping.py -q
