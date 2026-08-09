@@ -1525,6 +1525,15 @@ export default function WorkingPlatform() {
           {rulesData && (
             <div className={styles.journeyShell}>
               {suggestToast && <div className={styles.toast}>{suggestToast}</div>}
+              {/* QA REMEDIATION HIGH 12: "if I know that... these many
+                  pointers are there that I have to basically read." The
+                  per-rule checkbox already worked correctly (untouched
+                  here) — this is the missing at-a-glance total. */}
+              {rulesData.length > 0 && (
+                <p style={{ color: "#7c8090", fontSize: 13, margin: "0 0 16px" }}>
+                  {rulesData.filter((r) => r.read).length} of {rulesData.length} rules read
+                </p>
+              )}
               {rulesData.length === 0 && (
                 <div className={styles.noRecords}>No records found. No rules apply to you yet.</div>
               )}
