@@ -88,6 +88,20 @@ function fieldError(field: string, message: string) {
   return json({ detail: message, field }, 400);
 }
 
+// BUILD PROMPT v5 BLOCK C: mirrors content_assets_message_subtype_matches_kind
+// — required for (and only for) kind = 'onboarding_message'. Checked
+// server-side even though the DB constraint would also catch it, so the
+// admin console gets a field-specific error instead of a raw 400.
+const MESSAGE_SUBTYPES = ["welcome", "founder", "md", "co_founder", "management", "hr", "hr_training_video"];
+function validateMessageSubtype(kind: string, subtype: unknown) {
+  if (kind === "onboarding_message") {
+    if (!MESSAGE_SUBTYPES.includes(String(subtype))) return fieldError("message_subtype", "Choose who this message is from.");
+  } else if (subtype) {
+    return fieldError("message_subtype", "Message From only applies to Onboarding Message content.");
+  }
+  return null;
+}
+
 // Readiness score (BUILD PROMPT v4 item 3) — a transparent blend, not a
 // black box: every component that actually applies is listed in the
 // response so the UI can show a real breakdown on hover/click instead of
@@ -275,9 +289,12 @@ Deno.serve(async (req) => {
     // whole journey is "completed" once every stage is.
     // -------------------------------------------------------------------
     if (path === "/api/v1/onboarding/journey" && req.method === "GET") {
+      // BUILD PROMPT v5 BLOCK C: content_assets(...) here resolves a
+      // content_block item's linked asset (e.g. a Welcome Message) so the
+      // employee sees the real title/kind/link, not just a bare item title.
       const [{ data: stages, error }, { data: items }, { data: itemProgress }, { data: enrollments }] = await Promise.all([
         supabase.from("onboarding_stages").select("id,name,description,sequence").eq("org_id", user.org_id).order("sequence"),
-        supabase.from("onboarding_stage_items").select("id,stage_id,item_type,training_module_id,title,description,sequence,onboarding_stages!inner(org_id)").eq("onboarding_stages.org_id", user.org_id).order("sequence"),
+        supabase.from("onboarding_stage_items").select("id,stage_id,item_type,training_module_id,content_asset_id,title,description,sequence,onboarding_stages!inner(org_id),content_assets(title,kind,message_subtype,external_url)").eq("onboarding_stages.org_id", user.org_id).order("sequence"),
         supabase.from("employee_item_progress").select("item_id,completed_at").eq("user_id", user.id),
         supabase.from("enrollments").select("module_id,status").eq("org_id", user.org_id).eq("user_id", user.id),
       ]);
@@ -286,10 +303,10 @@ Deno.serve(async (req) => {
       const completedModuleIds = new Set((enrollments || []).filter((e) => e.status === "completed").map((e) => e.module_id));
       const itemsByStage = new Map<string, any[]>();
       for (const raw of items || []) {
-        const { onboarding_stages, ...item } = raw as any;
+        const { onboarding_stages, content_assets, ...item } = raw as any;
         const completed = item.item_type === "training_module" ? completedModuleIds.has(item.training_module_id) : ackByItem.has(item.id);
         if (!itemsByStage.has(item.stage_id)) itemsByStage.set(item.stage_id, []);
-        itemsByStage.get(item.stage_id)!.push({ ...item, completed, completed_at: item.item_type === "training_module" ? null : ackByItem.get(item.id) || null });
+        itemsByStage.get(item.stage_id)!.push({ ...item, content_asset: content_assets || null, completed, completed_at: item.item_type === "training_module" ? null : ackByItem.get(item.id) || null });
       }
       let priorComplete = true;
       const shaped = (stages || []).map((s) => {
@@ -787,14 +804,14 @@ Deno.serve(async (req) => {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const [{ data: stages, error }, { data: items }] = await Promise.all([
         supabase.from("onboarding_stages").select("id,name,description,sequence").eq("org_id", user.org_id).order("sequence"),
-        supabase.from("onboarding_stage_items").select("id,stage_id,item_type,training_module_id,title,description,sequence,onboarding_stages!inner(org_id)").eq("onboarding_stages.org_id", user.org_id).order("sequence"),
+        supabase.from("onboarding_stage_items").select("id,stage_id,item_type,training_module_id,content_asset_id,title,description,sequence,onboarding_stages!inner(org_id),content_assets(title,kind,message_subtype)").eq("onboarding_stages.org_id", user.org_id).order("sequence"),
       ]);
       if (error) throw error;
       const itemsByStage = new Map<string, unknown[]>();
       for (const item of items || []) {
-        const { onboarding_stages, ...rest } = item as any;
+        const { onboarding_stages, content_assets, ...rest } = item as any;
         if (!itemsByStage.has(rest.stage_id)) itemsByStage.set(rest.stage_id, []);
-        itemsByStage.get(rest.stage_id)!.push(rest);
+        itemsByStage.get(rest.stage_id)!.push({ ...rest, content_asset: content_assets || null });
       }
       return json((stages || []).map((s) => ({ ...s, items: itemsByStage.get(s.id) || [] })));
     }
@@ -836,9 +853,13 @@ Deno.serve(async (req) => {
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
       if (!Number.isInteger(body.sequence)) return fieldError("sequence", "Sequence is required.");
       if (body.item_type === "training_module" && !body.training_module_id) return fieldError("training_module_id", "Select a Training Module.");
+      // BUILD PROMPT v5 BLOCK C: a content_block item may optionally point
+      // at a real Content Library asset (e.g. the Welcome Message) instead
+      // of only carrying its own free-text title/description.
       const { data, error } = await supabase.from("onboarding_stage_items").insert({
         stage_id: stage.id, item_type: body.item_type,
         training_module_id: body.item_type === "training_module" ? body.training_module_id : null,
+        content_asset_id: body.item_type === "content_block" ? body.content_asset_id || null : null,
         title: body.title.trim(), description: body.description?.trim() || "", sequence: body.sequence,
       }).select().single();
       if (error) return json({ detail: error.message?.includes("duplicate") ? "An item already exists at that sequence position." : "Could not create the item." }, 409);
@@ -860,6 +881,10 @@ Deno.serve(async (req) => {
       if (body.title !== undefined) patch.title = String(body.title).trim();
       if (body.description !== undefined) patch.description = String(body.description).trim();
       if (body.sequence !== undefined) patch.sequence = body.sequence;
+      // content_asset_id is only meaningful for content_block items; the
+      // DB check constraint rejects it on any other type, so this only
+      // needs to pass the value through, not gate it a second time here.
+      if (body.content_asset_id !== undefined) patch.content_asset_id = body.content_asset_id || null;
       const { data, error } = await supabase.from("onboarding_stage_items").update(patch).eq("id", stageItemMatch[1]).select().maybeSingle();
       if (error) return json({ detail: "An item already exists at that sequence position." }, 409);
       await audit(user, "onboarding_stage_item.update", "onboarding_stage_item", data.id); return json(data);
@@ -1170,7 +1195,7 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/content" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const kind = rawUrl.searchParams.get("kind");
-      let request = supabase.from("content_assets").select("id,kind,title,description,department,file_name,mime_type,size_bytes,version,status,external_url,created_at", { count: "exact" }).eq("org_id", user.org_id);
+      let request = supabase.from("content_assets").select("id,kind,title,description,department,file_name,mime_type,size_bytes,version,status,external_url,message_subtype,created_at", { count: "exact" }).eq("org_id", user.org_id);
       if (kind) request = request.eq("kind", kind);
       const { data, error, count } = await request.order("created_at", { ascending: false }).range(from, to); if (error) throw error;
       return json({ items: data || [], page, page_size: pageSize, total: count || 0 });
@@ -1180,12 +1205,14 @@ Deno.serve(async (req) => {
       const body = await req.json();
       if (!body.file_name?.trim()) return fieldError("file_name", "Choose a file to upload.");
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
-      if (!["document","video","sop","mistake_register","template","image"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
+      if (!["document","video","sop","mistake_register","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
+      const messageSubtypeError = validateMessageSubtype(body.kind, body.message_subtype);
+      if (messageSubtypeError) return messageSubtypeError;
       const safeName = body.file_name.trim().replace(/[^a-zA-Z0-9_.-]/g, "-");
       const storagePath = `${user.org_id}/${body.kind}/${crypto.randomUUID()}-${safeName}`;
       const { data: signed, error: signError } = await supabase.storage.from(CONTENT_BUCKET).createSignedUploadUrl(storagePath);
       if (signError || !signed) return json({ detail: "Could not prepare the upload. Try again." }, 502);
-      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, storage_path: storagePath, file_name: safeName, mime_type: body.mime_type || "application/octet-stream", size_bytes: Number(body.size_bytes) || 0, uploaded_by: user.id, status: "pending" }).select().single();
+      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, storage_path: storagePath, file_name: safeName, mime_type: body.mime_type || "application/octet-stream", size_bytes: Number(body.size_bytes) || 0, uploaded_by: user.id, status: "pending" }).select().single();
       if (error) throw error;
       return json({ asset_id: asset.id, upload_url: signed.signedUrl, storage_path: storagePath }, 201);
     }
@@ -1194,8 +1221,10 @@ Deno.serve(async (req) => {
       const body = await req.json();
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
       if (!body.external_url?.trim() || !/^https?:\/\//i.test(body.external_url.trim())) return fieldError("external_url", "Enter a valid link starting with http:// or https://.");
-      if (!["document","video","sop","template","image"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
-      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, external_url: body.external_url.trim(), uploaded_by: user.id, status: "ready" }).select().single();
+      if (!["document","video","sop","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
+      const messageSubtypeError = validateMessageSubtype(body.kind, body.message_subtype);
+      if (messageSubtypeError) return messageSubtypeError;
+      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, external_url: body.external_url.trim(), uploaded_by: user.id, status: "ready" }).select().single();
       if (error) throw error;
       await audit(user, "content.link", "content_asset", asset.id, { kind: asset.kind, title: asset.title }); return json(asset, 201);
     }

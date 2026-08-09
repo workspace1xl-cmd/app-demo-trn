@@ -267,6 +267,13 @@ class OnboardingStageItem(Base, TimestampMixin):
     stage_id: Mapped[str] = mapped_column(ForeignKey("onboarding_stages.id"), index=True)
     item_type: Mapped[str] = mapped_column(String(30))
     training_module_id: Mapped[str | None] = mapped_column(ForeignKey("training_modules.id"), nullable=True)
+    # BUILD PROMPT v5 BLOCK C: not a real FK — Content Library
+    # (content_assets) has never been mirrored in this reference backend
+    # (it depends on Supabase Storage for file uploads, which this stack
+    # doesn't replicate). This column exists only so the row shape matches
+    # the Edge Function's; the journey/admin routes below always report
+    # content_asset: None here rather than pretending to resolve it.
+    content_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
     sequence: Mapped[int] = mapped_column(Integer)

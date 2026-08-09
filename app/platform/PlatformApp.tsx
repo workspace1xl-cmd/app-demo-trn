@@ -85,7 +85,7 @@ type TrainingModule = { id: string; sequence: number; code: string; title: strin
 // standard DashboardData above — the two are independent screens (the
 // journey replaces the dashboard's hero while incomplete, then steps aside
 // permanently once complete), not one payload with two shapes.
-type JourneyItem = { id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; title: string; description: string; sequence: number; completed: boolean; completed_at: string | null };
+type JourneyItem = { id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; content_asset_id: string | null; content_asset: { title: string; kind: string; message_subtype: string | null; external_url: string | null } | null; title: string; description: string; sequence: number; completed: boolean; completed_at: string | null };
 type JourneyStage = { id: string; name: string; description: string; sequence: number; status: "completed" | "available" | "locked"; items: JourneyItem[] };
 type Journey = { stages: JourneyStage[]; journey_complete: boolean };
 
@@ -857,6 +857,11 @@ export default function WorkingPlatform() {
                             <div className={styles.journeyItemBody}>
                               <b>{item.title}</b>
                               {item.description && <span>{item.description}</span>}
+                              {item.content_asset?.external_url && (
+                                <a className={styles.journeyLinkBtn} href={item.content_asset.external_url} target="_blank" rel="noopener noreferrer">
+                                  {item.content_asset.kind === "onboarding_message" ? "Watch / open message →" : "Open →"}
+                                </a>
+                              )}
                               {item.item_type === "training_module" && !item.completed && (
                                 <button type="button" className={styles.journeyLinkBtn} onClick={() => goToView("training")}>
                                   Go to My learning →
