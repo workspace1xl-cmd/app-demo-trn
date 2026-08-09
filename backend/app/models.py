@@ -116,6 +116,10 @@ class QuizQuestion(Base, TimestampMixin):
     options: Mapped[list] = mapped_column(JSON)
     correct_index: Mapped[int] = mapped_column(Integer)
     explanation: Mapped[str] = mapped_column(Text)
+    # QA REMEDIATION BLOCKER 2: how much this question counts toward the
+    # module's overall score — defaults to 100 (full weight, unchanged
+    # scoring for every question that existed before this fix).
+    weight_percent: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
 
 
 class Enrollment(Base, TimestampMixin):

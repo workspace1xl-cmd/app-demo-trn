@@ -674,7 +674,7 @@ def get_quiz(module_id: str, user: User = Depends(current_user), db: Session = D
     # BUILD PROMPT v5 BLOCK F: upfront requirements/remaining-attempts
     # display — seen before starting, not after failing enough to be blocked.
     attempts = _attempt_status(db, user, module.id, module.max_attempts)
-    return {"module_id": module.id, "title": module.title, "passing_score": module.passing_score, "questions": [{"id": q.id, "prompt": q.prompt, "options": q.options} for q in questions], **attempts}
+    return {"module_id": module.id, "title": module.title, "passing_score": module.passing_score, "questions": [{"id": q.id, "prompt": q.prompt, "options": q.options, "weight_percent": q.weight_percent} for q in questions], **attempts}
 
 
 @app.post("/api/v1/training/modules/{module_id}/attempt")
@@ -696,7 +696,14 @@ def submit_quiz(module_id: str, payload: QuizSubmission, user: User = Depends(cu
         raise HTTPException(403, {"detail": "You've used all your attempts for this quiz without passing. Ask your admin or manager to reset your attempts.", **attempts_before})
     if attempts_before["attempts_remaining"] <= 0:
         raise HTTPException(403, {"detail": "No attempts remaining for this quiz.", **attempts_before})
-    correct = sum(answer == question.correct_index for answer, question in zip(payload.answers, questions)); score = round(correct / len(questions) * 100); passed = score >= module.passing_score
+    # QA REMEDIATION BLOCKER 2: mirrors the Edge Function's weighted
+    # grading — weight_percent defaults to 100 so pre-existing questions
+    # score exactly as they did before this fix.
+    correct = sum(answer == question.correct_index for answer, question in zip(payload.answers, questions))
+    total_weight = sum(q.weight_percent for q in questions)
+    earned_weight = sum(q.weight_percent for answer, q in zip(payload.answers, questions) if answer == q.correct_index)
+    score = round((earned_weight / total_weight) * 100) if total_weight > 0 else 0
+    passed = score >= module.passing_score
     db.add(QuizAttempt(org_id=user.org_id, user_id=user.id, module_id=module.id, score=score, passed=passed, answers=payload.answers))
     enrollment = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.module_id == module.id))
     # A failed final attempt trips the block; a pass never does.

@@ -590,7 +590,10 @@ Deno.serve(async (req) => {
       const { data: module } = await supabase.from("training_modules").select("id,title,passing_score,max_attempts").eq("id", quizMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!module) return json({ detail: "Module not found." }, 404);
       const lockDenied = await assertModuleUnlocked(user, module.id); if (lockDenied) return lockDenied;
-      const { data: questions } = await supabase.from("quiz_questions").select("id,prompt,options").eq("org_id", user.org_id).eq("module_id", module.id).order("created_at");
+      // QA REMEDIATION BLOCKER 2: weight_percent surfaced upfront so the
+      // employee sees which questions count for more before starting,
+      // same "no surprise after the fact" principle as the attempt cap.
+      const { data: questions } = await supabase.from("quiz_questions").select("id,prompt,options,weight_percent").eq("org_id", user.org_id).eq("module_id", module.id).order("created_at");
       // BUILD PROMPT v5 BLOCK F: upfront requirements/remaining-attempts
       // display — the employee sees the threshold and cap before starting,
       // not after failing enough times to hit a surprise block.
@@ -601,7 +604,7 @@ Deno.serve(async (req) => {
     const attemptMatch = path.match(/^\/api\/v1\/training\/modules\/([^/]+)\/attempt$/);
     if (attemptMatch && req.method === "POST") {
       const { answers } = await req.json();
-      const [{ data: module }, { data: questions }] = await Promise.all([supabase.from("training_modules").select("*").eq("id", attemptMatch[1]).eq("org_id", user.org_id).maybeSingle(), supabase.from("quiz_questions").select("correct_index,explanation").eq("org_id", user.org_id).eq("module_id", attemptMatch[1]).order("created_at")]);
+      const [{ data: module }, { data: questions }] = await Promise.all([supabase.from("training_modules").select("*").eq("id", attemptMatch[1]).eq("org_id", user.org_id).maybeSingle(), supabase.from("quiz_questions").select("correct_index,explanation,weight_percent").eq("org_id", user.org_id).eq("module_id", attemptMatch[1]).order("created_at")]);
       if (!module) return json({ detail: "Module not found." }, 404);
       const lockDenied = await assertModuleUnlocked(user, module.id); if (lockDenied) return lockDenied;
       if (!questions?.length || answers?.length !== questions.length) return json({ detail: "Submit one answer for every question." }, 400);
@@ -615,7 +618,20 @@ Deno.serve(async (req) => {
       const attemptsBefore = await attemptStatus(user, module.id, module.max_attempts);
       if (attemptsBefore.onboarding_blocked) return json({ detail: "You've used all your attempts for this quiz without passing. Ask your admin or manager to reset your attempts.", ...attemptsBefore }, 403);
       if (attemptsBefore.attempts_remaining <= 0) return json({ detail: "No attempts remaining for this quiz.", ...attemptsBefore }, 403);
-      const correct = questions.filter((question, index) => question.correct_index === answers[index]).length, score = Math.round(correct / questions.length * 100), passed = score >= module.passing_score;
+      // QA REMEDIATION BLOCKER 2: "some questions may be required 100%
+      // pass marks, some 75%, some 50%" — a single-select MCQ answer is
+      // binary (right or wrong), so a per-question threshold can only
+      // mean how much that question counts toward the overall score.
+      // A 100%-weighted question missed hurts the score far more than a
+      // 50%-weighted one; weight_percent defaults to 100 (full weight)
+      // so every question created before this fix scores exactly as it
+      // did — this changes what "score" MEANS for new weighted setups,
+      // not the scores already on record.
+      const correct = questions.filter((question, index) => question.correct_index === answers[index]).length;
+      const totalWeight = questions.reduce((sum, q) => sum + (q.weight_percent ?? 100), 0);
+      const earnedWeight = questions.reduce((sum, q, index) => sum + (q.correct_index === answers[index] ? (q.weight_percent ?? 100) : 0), 0);
+      const score = totalWeight > 0 ? Math.round((earnedWeight / totalWeight) * 100) : 0;
+      const passed = score >= module.passing_score;
       await supabase.from("quiz_attempts").insert({ org_id: user.org_id, user_id: user.id, module_id: module.id, score, passed, answers });
       const { data: enrollment } = await supabase.from("enrollments").select("id,best_score").eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", module.id).maybeSingle();
       // A failed final attempt trips the block; a pass never does, even on
@@ -1286,13 +1302,19 @@ Deno.serve(async (req) => {
       if (!Array.isArray(body.options) || body.options.length < 2) return fieldError("options", "Provide at least two options.");
       if (typeof body.correct_index !== "number" || body.correct_index < 0 || body.correct_index >= body.options.length) return fieldError("correct_index", "Select which option is correct.");
       if (!body.explanation?.trim()) return fieldError("explanation", "Explanation is required.");
-      const { data, error } = await supabase.from("quiz_questions").insert({ org_id: user.org_id, module_id: questionsMatch[1], prompt: body.prompt.trim(), options: body.options, correct_index: body.correct_index, explanation: body.explanation.trim() }).select().single();
+      // QA REMEDIATION BLOCKER 2: how much this question counts toward
+      // the module's overall score — defaults to 100 (full weight) when
+      // not specified.
+      if (body.weight_percent !== undefined && (typeof body.weight_percent !== "number" || body.weight_percent <= 0 || body.weight_percent > 100)) return fieldError("weight_percent", "Weight must be between 1 and 100.");
+      const { data, error } = await supabase.from("quiz_questions").insert({ org_id: user.org_id, module_id: questionsMatch[1], prompt: body.prompt.trim(), options: body.options, correct_index: body.correct_index, explanation: body.explanation.trim(), weight_percent: body.weight_percent ?? 100 }).select().single();
       if (error) throw error; await audit(user, "question.create", "quiz_question", data.id); return json(data, 201);
     }
     const questionMatch = path.match(/^\/api\/v1\/admin\/training\/questions\/([^/]+)$/);
     if (questionMatch && req.method === "PATCH") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const body = await req.json(); const editable = ["prompt","options","correct_index","explanation"];
+      const body = await req.json();
+      if (body.weight_percent !== undefined && (typeof body.weight_percent !== "number" || body.weight_percent <= 0 || body.weight_percent > 100)) return fieldError("weight_percent", "Weight must be between 1 and 100.");
+      const editable = ["prompt","options","correct_index","explanation","weight_percent"];
       const patch: Record<string, unknown> = {}; for (const key of editable) if (body[key] !== undefined) patch[key] = body[key];
       const { data, error } = await supabase.from("quiz_questions").update(patch).eq("id", questionMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
       if (error) throw error; if (!data) return json({ detail: "Question not found." }, 404);

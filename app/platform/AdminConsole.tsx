@@ -1018,7 +1018,7 @@ function MatrixPanel({ token }: { token: string }) {
 // ---------------------------------------------------------------------------
 
 type TrainingModuleRow = { id: string; code: string; title: string; objective: string; duration_minutes: number; passing_score: number; sequence: number; status: string; sop_url?: string | null; sop_label?: string | null; max_attempts?: number | null };
-type QuizQuestionRow = { id: string; prompt: string; options: string[]; correct_index: number; explanation: string };
+type QuizQuestionRow = { id: string; prompt: string; options: string[]; correct_index: number; explanation: string; weight_percent: number };
 
 function QuizBuilderModal({ token, module, onClose }: { token: string; module: TrainingModuleRow; onClose: () => void }) {
   const [questions, setQuestions] = useState<QuizQuestionRow[]>([]);
@@ -1051,6 +1051,7 @@ function QuizBuilderModal({ token, module, onClose }: { token: string; module: T
           columns={[
             { key: "prompt", label: "Prompt", render: (row) => (<><b>{row.prompt}</b><small>Correct: {row.options[row.correct_index]}</small></>) },
             { key: "options", label: "Options", render: (row) => row.options.join(" · ") },
+            { key: "weight_percent", label: "Weight", render: (row) => `${row.weight_percent}%` },
           ]}
           rows={questions}
           rowId={(row) => row.id}
@@ -1104,6 +1105,10 @@ function QuestionFormModal({ token, moduleId, existing, onCancel, onSaved }: { t
   const [options, setOptions] = useState<string[]>(existing?.options || ["", "", "", ""]);
   const [correctIndex, setCorrectIndex] = useState(existing?.correct_index ?? 0);
   const [explanation, setExplanation] = useState(existing?.explanation || "");
+  // QA REMEDIATION BLOCKER 2: "some questions may be required 100% pass
+  // marks, some 75%, some 50%" — how much this question counts toward
+  // the module's overall score. Defaults to 100 (full weight).
+  const [weightPercent, setWeightPercent] = useState(existing?.weight_percent ?? 100);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1114,10 +1119,11 @@ function QuestionFormModal({ token, moduleId, existing, onCancel, onSaved }: { t
     const filledOptions = options.map((o) => o.trim()).filter(Boolean);
     if (filledOptions.length < 2) nextErrors.options = "Provide at least two options.";
     if (!explanation.trim()) nextErrors.explanation = "Explanation is required.";
+    if (!Number.isFinite(weightPercent) || weightPercent <= 0 || weightPercent > 100) nextErrors.weight_percent = "Weight must be between 1 and 100.";
     if (Object.keys(nextErrors).length) { setErrors(nextErrors); return; }
     setBusy(true); setBanner(""); setErrors({});
     try {
-      const payload = { prompt: prompt.trim(), options: filledOptions, correct_index: correctIndex, explanation: explanation.trim() };
+      const payload = { prompt: prompt.trim(), options: filledOptions, correct_index: correctIndex, explanation: explanation.trim(), weight_percent: weightPercent };
       if (existing) await submitJson(`/api/v1/admin/training/questions/${existing.id}`, token, "PATCH", payload);
       else await submitJson(`/api/v1/admin/training/modules/${moduleId}/questions`, token, "POST", payload);
       onSaved();
@@ -1156,6 +1162,23 @@ function QuestionFormModal({ token, moduleId, existing, onCancel, onSaved }: { t
           <label>Explanation<span className={styles.required}>*</span></label>
           <textarea value={explanation} placeholder="Enter Explanation" onChange={(e) => setExplanation(e.target.value)} />
           {errors.explanation && <p className={styles.fieldError}>{errors.explanation}</p>}
+        </div>
+        <div className={styles.field} data-invalid={errors.weight_percent ? "true" : "false"}>
+          <label>Weight (%)<span className={styles.required}>*</span></label>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={weightPercent}
+            placeholder="Enter Weight"
+            onChange={(e) => setWeightPercent(Number(e.target.value))}
+          />
+          {!errors.weight_percent && (
+            <p className={styles.fieldError} style={{ color: "#8b8f9e" }}>
+              How much this question counts toward the module&rsquo;s overall score — a 100% question answered wrong hurts the score more than a 50% question. Defaults to 100 (equal weight for every question).
+            </p>
+          )}
+          {errors.weight_percent && <p className={styles.fieldError}>{errors.weight_percent}</p>}
         </div>
       </div>
       <div className={styles.modalFooter}>
