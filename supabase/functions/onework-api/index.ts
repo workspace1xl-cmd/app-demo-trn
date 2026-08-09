@@ -627,6 +627,51 @@ Deno.serve(async (req) => {
       const { data, error } = await request; if (error) throw error; return json(data);
     }
 
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK H: Knowledge Search default state — curated
+    // blocks shown before the employee types anything, instead of a blank
+    // box. Top Searches / Trending This Week / Popular in Your Department
+    // are all just different filters over the real search log that
+    // already existed (audit_events, action = 'knowledge.search', logged
+    // by the /api/v1/search route below on every real search) — not a new
+    // table duplicating it. Recently Added is genuinely new content
+    // (training modules + content library items), not searches.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/search/defaults" && req.method === "GET") {
+      function topQueries(rows: { details: any }[], limit: number) {
+        const counts = new Map<string, number>();
+        for (const row of rows) {
+          const q = String(row.details?.query || "").trim().toLowerCase();
+          if (!q) continue;
+          counts.set(q, (counts.get(q) || 0) + 1);
+        }
+        return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([query, count]) => ({ query, count }));
+      }
+      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const [{ data: allSearches }, { data: weekSearches }, { data: deptUsers }, { data: recentModules }, { data: recentContent }] = await Promise.all([
+        supabase.from("audit_events").select("details").eq("org_id", user.org_id).eq("action", "knowledge.search").order("created_at", { ascending: false }).limit(500),
+        supabase.from("audit_events").select("details").eq("org_id", user.org_id).eq("action", "knowledge.search").gte("created_at", weekAgo).order("created_at", { ascending: false }).limit(500),
+        user.department_id ? supabase.from("app_users").select("id").eq("org_id", user.org_id).eq("department_id", user.department_id) : Promise.resolve({ data: [] as { id: string }[] }),
+        supabase.from("training_modules").select("id,title,code,created_at").eq("org_id", user.org_id).eq("status", "published").order("created_at", { ascending: false }).limit(6),
+        supabase.from("content_assets").select("id,title,kind,created_at").eq("org_id", user.org_id).eq("status", "ready").order("created_at", { ascending: false }).limit(6),
+      ]);
+      const deptUserIds = new Set((deptUsers || []).map((u: { id: string }) => u.id));
+      let deptSearches: { details: any }[] = [];
+      if (deptUserIds.size) {
+        const { data } = await supabase.from("audit_events").select("details,actor_user_id").eq("org_id", user.org_id).eq("action", "knowledge.search").in("actor_user_id", [...deptUserIds]).order("created_at", { ascending: false }).limit(500);
+        deptSearches = data || [];
+      }
+      return json({
+        top_searches: topQueries(allSearches || [], 6),
+        trending_this_week: topQueries(weekSearches || [], 6),
+        popular_in_department: user.department_id ? topQueries(deptSearches, 6) : [],
+        recently_added: [
+          ...(recentModules || []).map((m: any) => ({ title: m.title, kind: "training_module", label: m.code, created_at: m.created_at })),
+          ...(recentContent || []).map((c: any) => ({ title: c.title, kind: c.kind, label: c.kind.replace(/_/g, " "), created_at: c.created_at })),
+        ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 6),
+      });
+    }
+
     if (path === "/api/v1/search" && req.method === "POST") {
       const { query } = await req.json(); const safe = String(query || "").replace(/[%_,]/g, " ").trim();
       if (safe.length < 2) return json({ detail: "Question is too short." }, 400);

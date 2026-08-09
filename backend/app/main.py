@@ -746,6 +746,42 @@ def _search_terms(query: str) -> list[str]:
     return terms or [query.lower()]
 
 
+# BUILD PROMPT v5 BLOCK H: Knowledge Search default state — curated blocks
+# shown before the employee types anything. Top Searches / Trending This
+# Week / Popular in Your Department are all filters over the real search
+# log (AuditEvent, action='knowledge.search', logged by knowledge_search
+# below on every real search) — not a new table. Recently Added is
+# genuinely new content (training modules — content_assets isn't mirrored
+# in this stack, same pre-existing gap as Blocks C/E).
+def _top_queries(rows: list[AuditEvent], limit: int) -> list[dict]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        q = str((row.details or {}).get("query") or "").strip().lower()
+        if not q:
+            continue
+        counts[q] = counts.get(q, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    return [{"query": q, "count": c} for q, c in ranked]
+
+
+@app.get("/api/v1/search/defaults")
+def search_defaults(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    all_searches = db.scalars(select(AuditEvent).where(AuditEvent.org_id == user.org_id, AuditEvent.action == "knowledge.search").order_by(AuditEvent.created_at.desc()).limit(500)).all()
+    week_searches = [r for r in all_searches if r.created_at >= week_ago]
+    dept_searches: list[AuditEvent] = []
+    if user.department_id:
+        dept_user_ids = {u.id for u in db.scalars(select(User).where(User.org_id == user.org_id, User.department_id == user.department_id)).all()}
+        dept_searches = [r for r in all_searches if r.actor_user_id in dept_user_ids]
+    recent_modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id, TrainingModule.status == "published").order_by(TrainingModule.created_at.desc()).limit(6)).all()
+    return {
+        "top_searches": _top_queries(all_searches, 6),
+        "trending_this_week": _top_queries(week_searches, 6),
+        "popular_in_department": _top_queries(dept_searches, 6) if user.department_id else [],
+        "recently_added": [{"title": m.title, "kind": "training_module", "label": m.code, "created_at": m.created_at.isoformat()} for m in recent_modules],
+    }
+
+
 @app.post("/api/v1/search")
 async def knowledge_search(payload: SearchRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
     terms = _search_terms(payload.query)

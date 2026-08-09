@@ -98,6 +98,11 @@ type MyRule = { id: string; title: string; category: string; is_mandatory: boole
 // BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — "My Submissions".
 type MySubmission = { id: string; type: "query" | "suggestion"; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; created_at: string; resolved_at: string | null };
 
+// BUILD PROMPT v5 BLOCK H: Knowledge Search default state.
+type SearchQueryCount = { query: string; count: number };
+type RecentlyAddedItem = { title: string; kind: string; label: string };
+type SearchDefaults = { top_searches: SearchQueryCount[]; trending_this_week: SearchQueryCount[]; popular_in_department: SearchQueryCount[]; recently_added: RecentlyAddedItem[] };
+
 // BUILD PROMPT v5 BLOCK E: a plain URL into SOPGalaxy, same "render as a
 // real link only when it looks like one" convention already used for
 // Activity.sop_link.
@@ -235,6 +240,8 @@ export default function WorkingPlatform() {
   const [journey, setJourney] = useState<Journey | null>(null);
   const [journeyBusyId, setJourneyBusyId] = useState<string | null>(null);
   const [query, setQuery] = useState("leave");
+  // BUILD PROMPT v5 BLOCK H: Knowledge Search default state.
+  const [searchDefaults, setSearchDefaults] = useState<SearchDefaults | null>(null);
   const [toast, setToast] = useState("");
   const [showSignup, setShowSignup] = useState(false);
   const [activeQuizModule, setActiveQuizModule] = useState<string | null>(null);
@@ -448,6 +455,16 @@ export default function WorkingPlatform() {
     return () => window.clearTimeout(timer);
   }, [session, view, reloadKey]);
 
+  // BUILD PROMPT v5 BLOCK H: fetched independently of `data` — the default-
+  // state blocks live under the search box until a real search runs, at
+  // which point `data`/`searchData` takes over the view entirely.
+  useEffect(() => {
+    if (!session || view !== "search") return;
+    request<SearchDefaults>("/api/v1/search/defaults", session.access_token)
+      .then(setSearchDefaults)
+      .catch(() => setSearchDefaults(null));
+  }, [session, view]);
+
   // BUILD PROMPT v5 BLOCK B: fetched independently of `data` above — admins
   // never see the onboarding home. `completeJourneyItem` below re-fetches
   // itself after a successful "mark done", so this effect doesn't need
@@ -573,15 +590,14 @@ export default function WorkingPlatform() {
     }
   }
 
-  async function search(event: FormEvent) {
-    event.preventDefault();
+  async function runSearch(term: string) {
     if (!session) return;
     setBusy(true);
     setError("");
     try {
       const result = await request<SearchData>("/api/v1/search", session.access_token, {
         method: "POST",
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query: term }),
       });
       setData(result);
       // The UI tells the employee an unresolved question "has been logged
@@ -591,7 +607,7 @@ export default function WorkingPlatform() {
       if (result.unresolved) {
         request("/api/v1/feedback", session.access_token, {
           method: "POST",
-          body: JSON.stringify({ query, reason: "No verified organisational match was found for this question." }),
+          body: JSON.stringify({ query: term, reason: "No verified organisational match was found for this question." }),
         }).catch(() => {});
       }
     } catch (e) {
@@ -600,6 +616,19 @@ export default function WorkingPlatform() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function search(event: FormEvent) {
+    event.preventDefault();
+    await runSearch(query);
+  }
+
+  // BUILD PROMPT v5 BLOCK H: clicking a curated default-state chip (Top
+  // Searches, Trending, Popular in Your Department) runs that search
+  // immediately, the same as typing it and hitting Search.
+  function runSearchFromChip(term: string) {
+    setQuery(term);
+    void runSearch(term);
   }
 
   function handleQuizCompleted(result: { score: number; passed: boolean }) {
@@ -1068,6 +1097,56 @@ export default function WorkingPlatform() {
                 />
                 <button disabled={busy}>{busy ? "Searching…" : "Search verified knowledge →"}</button>
               </form>
+              {/* BUILD PROMPT v5 BLOCK H: curated default state, shown
+                  until a real search has run this session — real
+                  query-frequency data, not placeholder copy. Each block
+                  that's genuinely empty (e.g. nobody in this department
+                  has searched yet) is simply omitted rather than shown
+                  with fake content. */}
+              {!searchData?.query && searchDefaults && (
+                <div className={styles.journeyShell} style={{ marginTop: 18 }}>
+                  {[
+                    ["Top Searches", searchDefaults.top_searches],
+                    ["Trending This Week", searchDefaults.trending_this_week],
+                    ["Popular in Your Department", searchDefaults.popular_in_department],
+                  ].map(([label, items]) => {
+                    const list = items as SearchQueryCount[];
+                    if (!list.length) return null;
+                    return (
+                      <div key={label as string} style={{ marginBottom: 20 }}>
+                        <b style={{ display: "block", fontSize: 13, marginBottom: 10, color: "#17182f" }}>{label as string}</b>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                          {list.map((item) => (
+                            <button
+                              key={item.query}
+                              type="button"
+                              className={styles.resourceChip}
+                              onClick={() => runSearchFromChip(item.query)}
+                            >
+                              {item.query} <small style={{ opacity: 0.6 }}>· {item.count}</small>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {searchDefaults.recently_added.length > 0 && (
+                    <div>
+                      <b style={{ display: "block", fontSize: 13, marginBottom: 10, color: "#17182f" }}>Recently Added</b>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {searchDefaults.recently_added.map((item, i) => (
+                          <span key={i} className={styles.resourceChip} style={{ cursor: "default" }}>
+                            {item.title} <small style={{ opacity: 0.6 }}>· {item.label}</small>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {!searchDefaults.top_searches.length && !searchDefaults.trending_this_week.length && !searchDefaults.popular_in_department.length && !searchDefaults.recently_added.length && (
+                    <p style={{ color: "#8b8f9e", fontSize: 13, margin: 0 }}>Nothing to show yet — be the first to search.</p>
+                  )}
+                </div>
+              )}
               {searchData?.query && (
                 <section className={styles.answer}>
                   <span className={searchData.unresolved ? styles.warnBadge : ""}>
