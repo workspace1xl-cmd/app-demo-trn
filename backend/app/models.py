@@ -332,6 +332,11 @@ class Rule(Base, TimestampMixin):
     # Activity.sop_link / TrainingModule.sop_url.
     sop_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     sop_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # BUILD PROMPT v5 BLOCK I: not a real FK — Content Library
+    # (content_assets) isn't mirrored in this reference backend, same
+    # pre-existing gap as OnboardingStageItem.content_asset_id (Blocks
+    # C/E). Always reports attachment: None here.
+    attachment_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class RuleVersion(Base):

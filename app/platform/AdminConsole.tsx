@@ -1704,6 +1704,7 @@ type MistakeRow = { id: string; code: string; title: string; description: string
 const CONTENT_KIND_OPTIONS = [
   { value: "document", label: "Document" },
   { value: "video", label: "Video" },
+  { value: "audio", label: "Audio" },
   { value: "sop", label: "SOP File" },
   { value: "mistake_register", label: "Mistake Register Sheet" },
   { value: "template", label: "Template" },
@@ -2400,7 +2401,7 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
 // department-scoped visibility, suggest-a-change review queue.
 // ---------------------------------------------------------------------------
 
-type AdminRule = { id: string; department_id: string | null; department_name: string | null; title: string; category: string; is_mandatory: boolean; status: string; published_version_id: string | null; published_version: { version: number; body: string } | null; sop_url: string | null; sop_label: string | null; created_at: string };
+type AdminRule = { id: string; department_id: string | null; department_name: string | null; title: string; category: string; is_mandatory: boolean; status: string; published_version_id: string | null; published_version: { version: number; body: string } | null; sop_url: string | null; sop_label: string | null; attachment_asset_id: string | null; created_at: string };
 type RuleSuggestion = { id: string; rule_id: string; rule_title: string; suggested_by: string; suggested_by_name: string; suggestion_text: string; status: string; rejection_reason: string | null; target_implementation_date: string | null; reviewed_at: string | null; created_at: string };
 
 const SUGGESTION_STATUSES = ["submitted", "under_review", "accepted", "rejected", "implementation_pending", "implemented"];
@@ -2426,6 +2427,15 @@ function RulesListTab({ token }: { token: string }) {
   const [modal, setModal] = useState<null | { mode: "create" } | { mode: "edit"; row: AdminRule }>(null);
   const [versionModal, setVersionModal] = useState<AdminRule | null>(null);
   const departments = useLookup<{ id: string; name: string }>(token, "/api/v1/admin/departments");
+  // BUILD PROMPT v5 BLOCK I: any Content Library asset (video/audio/
+  // image/document) can be attached to a rule — /api/v1/admin/content
+  // returns a Paged<T>, so this is its own fetch rather than useLookup.
+  const [attachmentOptions, setAttachmentOptions] = useState<{ id: string; title: string; kind: string }[]>([]);
+  useEffect(() => {
+    request<Paged<{ id: string; title: string; kind: string }>>("/api/v1/admin/content?page_size=100", token)
+      .then((res) => setAttachmentOptions(res.items))
+      .catch(() => {});
+  }, [token]);
 
   function load() {
     request<AdminRule[]>("/api/v1/admin/rules", token)
@@ -2445,6 +2455,9 @@ function RulesListTab({ token }: { token: string }) {
     // Matrix's SOPGalaxy Link field.
     { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
     { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
+    // BUILD PROMPT v5 BLOCK I: a real attached asset — different from the
+    // SOPGalaxy Link above, which is a plain external reference.
+    { key: "attachment_asset_id", label: "Attachment (video/audio/image/document)", type: "select", options: attachmentOptions.map((a) => ({ value: a.id, label: `${a.title} (${a.kind})` })), helpText: "Leave blank if this rule has no attached media." },
     ...(modal?.mode === "create" ? [{ key: "body", label: "Rule Content", type: "textarea" as const, required: true }] : []),
   ];
 
@@ -2476,7 +2489,7 @@ function RulesListTab({ token }: { token: string }) {
         <FormModal
           title={modal.mode === "create" ? "Add Rule" : "Edit Rule"}
           fields={ruleFields}
-          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory), sop_url: modal.row.sop_url || "", sop_label: modal.row.sop_label || "" } : { is_mandatory: "true" }}
+          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory), sop_url: modal.row.sop_url || "", sop_label: modal.row.sop_label || "", attachment_asset_id: modal.row.attachment_asset_id || "" } : { is_mandatory: "true" }}
           submitLabel={modal.mode === "create" ? "Add Rule" : "Save Changes"}
           onCancel={() => setModal(null)}
           onSubmit={async (values) => {
