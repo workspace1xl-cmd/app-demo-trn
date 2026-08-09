@@ -200,7 +200,7 @@ export async function request<T = PlatformData>(
   }
   if (!response.ok)
     throw new Error(
-      (await response.json().catch(() => ({}))).detail || "Request failed",
+      (await response.json().catch(() => ({}))).detail || "Request failed.",
     );
   return response.json() as Promise<T>;
 }
@@ -242,6 +242,8 @@ export default function WorkingPlatform() {
   const [query, setQuery] = useState("leave");
   // BUILD PROMPT v5 BLOCK H: Knowledge Search default state.
   const [searchDefaults, setSearchDefaults] = useState<SearchDefaults | null>(null);
+  const [searchDefaultsLoading, setSearchDefaultsLoading] = useState(false);
+  const [searchDefaultsError, setSearchDefaultsError] = useState(false);
   const [toast, setToast] = useState("");
   const [showSignup, setShowSignup] = useState(false);
   const [activeQuizModule, setActiveQuizModule] = useState<string | null>(null);
@@ -449,7 +451,7 @@ export default function WorkingPlatform() {
       setError("");
       request<PlatformData>(paths[view], session.access_token)
         .then(setData)
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : "Request failed"))
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : "Request failed."))
         .finally(() => setBusy(false));
     }, 0);
     return () => window.clearTimeout(timer);
@@ -460,9 +462,18 @@ export default function WorkingPlatform() {
   // which point `data`/`searchData` takes over the view entirely.
   useEffect(() => {
     if (!session || view !== "search") return;
-    request<SearchDefaults>("/api/v1/search/defaults", session.access_token)
-      .then(setSearchDefaults)
-      .catch(() => setSearchDefaults(null));
+    const timer = window.setTimeout(() => {
+      setSearchDefaultsLoading(true);
+      setSearchDefaultsError(false);
+      request<SearchDefaults>("/api/v1/search/defaults", session.access_token)
+        .then(setSearchDefaults)
+        .catch(() => {
+          setSearchDefaults(null);
+          setSearchDefaultsError(true);
+        })
+        .finally(() => setSearchDefaultsLoading(false));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [session, view]);
 
   // BUILD PROMPT v5 BLOCK B: fetched independently of `data` above — admins
@@ -612,7 +623,7 @@ export default function WorkingPlatform() {
       }
     } catch (e) {
       setData(null); // don't leave the previous answer rendered under the new error
-      setError(e instanceof Error ? e.message : "Search failed");
+      setError(e instanceof Error ? e.message : "Search failed.");
     } finally {
       setBusy(false);
     }
@@ -634,7 +645,7 @@ export default function WorkingPlatform() {
   function handleQuizCompleted(result: { score: number; passed: boolean }) {
     setActiveQuizModule(null);
     setToast(
-      `Assessment submitted: ${result.score}% · ${result.passed ? "Passed" : "Retake required"}`,
+      `Assessment submitted: ${result.score}% · ${result.passed ? "Passed" : "Retake required"}.`,
     );
     setTimeout(() => setToast(""), 3500);
     setReloadKey((k) => k + 1);
@@ -1103,6 +1114,12 @@ export default function WorkingPlatform() {
                   that's genuinely empty (e.g. nobody in this department
                   has searched yet) is simply omitted rather than shown
                   with fake content. */}
+              {!searchData?.query && searchDefaultsLoading && (
+                <p style={{ color: "#8b8f9e", fontSize: 13, marginTop: 18 }}>Loading suggested searches…</p>
+              )}
+              {!searchData?.query && !searchDefaultsLoading && searchDefaultsError && (
+                <p style={{ color: "#c0392b", fontSize: 13, marginTop: 18 }}>Couldn&rsquo;t load suggested searches. Try again shortly.</p>
+              )}
               {!searchData?.query && searchDefaults && (
                 <div className={styles.journeyShell} style={{ marginTop: 18 }}>
                   {[
