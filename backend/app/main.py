@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
-from .models import Activity, AuditEvent, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, Organization, QuizAttempt, QuizQuestion, ReadinessSnapshot, TrainingModule, User
+from .models import Activity, AuditEvent, Candidate, Certificate, Department, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, OrgPreboardingContent, Organization, PreboardingAcknowledgment, QuizAttempt, QuizQuestion, ReadinessSnapshot, TrainingModule, User
 from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SearchRequest, TokenResponse
 from .security import create_token, hash_password, verify_password
 from .seed import MODULES, seed_database
@@ -149,6 +149,50 @@ def create_organization(payload: OrganizationSignup, db: Session = Depends(get_d
 
     audit(db, admin, "organization.provision", "organization", org.id, {"name": org.name}); db.commit()
     return TokenResponse(access_token=create_token(admin.id, org.id, admin.role), user={"id": admin.id, "name": admin.full_name, "email": admin.email, "role": admin.role, "org_id": org.id, "org_name": org.name})
+
+
+# ---------------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK A: Pre-Joining Portal — genuinely public routes
+# (no Depends(current_user)/admin_user): a candidate has no account yet,
+# so there's no session to authenticate. Scoped entirely by invite_token.
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/public/preview/{token}")
+def public_preview(token: str, db: Session = Depends(get_db)):
+    candidate = db.scalar(select(Candidate).where(Candidate.invite_token == token))
+    if not candidate:
+        raise HTTPException(404, "This invite link isn't valid. Ask whoever sent it for a new one.")
+    org = db.get(Organization, candidate.org_id)
+    department = db.get(Department, candidate.department_id) if candidate.department_id else None
+    content = {c.block_key: c.body for c in db.scalars(select(OrgPreboardingContent).where(OrgPreboardingContent.org_id == candidate.org_id)).all()}
+    ack = db.scalar(select(PreboardingAcknowledgment).where(PreboardingAcknowledgment.candidate_id == candidate.id))
+    return {
+        "candidate_name": candidate.full_name,
+        "org_name": org.name if org else "the organisation",
+        "department_name": department.name if department else None,
+        "welcome": content.get("welcome", ""),
+        "expectations_from_you": content.get("expectations_from_you", ""),
+        "expectations_from_us": content.get("expectations_from_us", ""),
+        # Block D (Rules & Regulations) doesn't exist yet — say so rather
+        # than silently showing an empty rules section.
+        "rules_available": False,
+        "already_acknowledged": ack is not None,
+        "acknowledged_at": ack.acknowledged_at.isoformat() if ack else None,
+    }
+
+
+@app.post("/api/v1/public/preview/{token}/acknowledge")
+def public_acknowledge(token: str, request: Request, db: Session = Depends(get_db)):
+    candidate = db.scalar(select(Candidate).where(Candidate.invite_token == token))
+    if not candidate:
+        raise HTTPException(404, "This invite link isn't valid. Ask whoever sent it for a new one.")
+    # Idempotent: a double-click or a reloaded confirmation page must not
+    # error just because the acknowledgment already exists.
+    existing = db.scalar(select(PreboardingAcknowledgment).where(PreboardingAcknowledgment.candidate_id == candidate.id))
+    if not existing:
+        db.add(PreboardingAcknowledgment(candidate_id=candidate.id, ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent")))
+        candidate.status = "acknowledged"
+        db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/v1/me")
@@ -731,6 +775,60 @@ def employee_dict(item: User) -> dict:
 def employees_lookup(user: User = Depends(admin_user), db: Session = Depends(get_db)):
     rows = db.scalars(select(User).where(User.org_id == user.org_id, User.is_active == True).order_by(User.full_name)).all()  # noqa: E712
     return [{"id": u.id, "full_name": u.full_name} for u in rows]
+
+
+# ---------------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK A: admin side — invite candidates, see who's
+# acknowledged, edit the preview page's content blocks.
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/admin/candidates")
+def list_candidates(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(Candidate).where(Candidate.org_id == user.org_id).order_by(Candidate.created_at.desc())).all()
+    dept_by_id = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == user.org_id)).all()}
+    acks = {a.candidate_id: a.acknowledged_at for a in db.scalars(select(PreboardingAcknowledgment)).all()}
+    return [
+        {"id": c.id, "full_name": c.full_name, "email": c.email, "department_id": c.department_id, "department_name": dept_by_id.get(c.department_id) if c.department_id else None,
+         "invite_token": c.invite_token, "status": c.status, "created_at": c.created_at.isoformat(), "acknowledged_at": acks[c.id].isoformat() if c.id in acks else None}
+        for c in rows
+    ]
+
+
+@app.post("/api/v1/admin/candidates", status_code=201)
+def create_candidate(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    full_name = str(payload.get("full_name") or "").strip()
+    email = str(payload.get("email") or "").strip().lower()
+    if not full_name:
+        raise HTTPException(400, {"detail": "Full Name is required.", "field": "full_name"})
+    if not email or "@" not in email:
+        raise HTTPException(400, {"detail": "Enter a valid Email ID.", "field": "email"})
+    if db.scalar(select(Candidate).where(Candidate.org_id == user.org_id, Candidate.email == email)):
+        raise HTTPException(409, "A candidate with this Email ID has already been invited.")
+    candidate = Candidate(org_id=user.org_id, full_name=full_name, email=email, department_id=payload.get("department_id") or None, created_by=user.id)
+    db.add(candidate); db.flush()
+    audit(db, user, "candidate.invite", "candidate", candidate.id, {"email": candidate.email}); db.commit()
+    return {"id": candidate.id, "full_name": candidate.full_name, "email": candidate.email, "invite_token": candidate.invite_token, "status": candidate.status}
+
+
+@app.get("/api/v1/admin/preboarding-content")
+def get_preboarding_content(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(OrgPreboardingContent).where(OrgPreboardingContent.org_id == user.org_id)).all()
+    return {r.block_key: r.body for r in rows}
+
+
+@app.patch("/api/v1/admin/preboarding-content")
+def update_preboarding_content(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    allowed = {"welcome", "expectations_from_you", "expectations_from_us"}
+    keys = [k for k in payload if k in allowed]
+    if not keys:
+        raise HTTPException(400, "Nothing to update.")
+    for key in keys:
+        row = db.get(OrgPreboardingContent, (user.org_id, key))
+        if row:
+            row.body = str(payload[key])
+        else:
+            db.add(OrgPreboardingContent(org_id=user.org_id, block_key=key, body=str(payload[key])))
+    audit(db, user, "preboarding_content.update", "organization", user.org_id, {"blocks": keys}); db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/v1/admin/employees")

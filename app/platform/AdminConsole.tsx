@@ -583,6 +583,151 @@ function Toolbar({ q, onSearch, placeholder, createLabel, onCreate, extra }: { q
 
 type Department = { id: string; name: string; code: string; employee_count?: number; readiness_score?: number | null };
 
+// ---------------------------------------------------------------------------
+// Candidates (BUILD PROMPT v5 BLOCK A: Pre-Joining Portal)
+// ---------------------------------------------------------------------------
+
+type Candidate = { id: string; full_name: string; email: string; department_id: string | null; department_name: string | null; invite_token: string; status: string; created_at: string; acknowledged_at: string | null };
+
+function CandidatesPanel({ token }: { token: string }) {
+  const [tab, setTab] = useState<"candidates" | "content">("candidates");
+  const [reloadKey, setReloadKey] = useState(0);
+  const list = useClientList<Candidate>(token, "/api/v1/admin/candidates", ["full_name", "email"], reloadKey);
+  const departments = useLookup<Department>(token, "/api/v1/admin/departments");
+  const [modal, setModal] = useState<null | { mode: "create" }>(null);
+  const [toast, setToast] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const fields: FieldDef[] = [
+    { key: "full_name", label: "Full Name", type: "text", required: true },
+    { key: "email", label: "Email ID", type: "email", required: true },
+    { key: "department_id", label: "Department", type: "select", options: departments.map((d) => ({ value: d.id, label: d.name })), helpText: "Optional — leave blank if not yet decided. If set, the candidate sees that department's expectations." },
+  ];
+
+  function inviteLink(inviteToken: string) {
+    return typeof window !== "undefined" ? `${window.location.origin}/join/${inviteToken}` : `/join/${inviteToken}`;
+  }
+  function copyLink(row: Candidate) {
+    navigator.clipboard?.writeText(inviteLink(row.invite_token)).then(() => {
+      setCopiedId(row.id);
+      setTimeout(() => setCopiedId((v) => (v === row.id ? null : v)), 2000);
+    });
+  }
+
+  return (
+    <section>
+      <div className={styles.adminSubTabs}>
+        <button type="button" data-active={tab === "candidates"} onClick={() => setTab("candidates")}>Candidates</button>
+        <button type="button" data-active={tab === "content"} onClick={() => setTab("content")}>Preview Page Content</button>
+      </div>
+      {tab === "candidates" && (
+        <>
+          <Toolbar q={list.q} onSearch={list.setQ} placeholder="Search candidates" createLabel="+ Invite Candidate" onCreate={() => setModal({ mode: "create" })} />
+          <Feedback error={list.error} toast={toast} />
+          <DataTable
+            columns={[
+              { key: "full_name", label: "Full Name", render: (row) => (<><b>{row.full_name}</b><small>{row.email}</small></>) },
+              { key: "department_name", label: "Department", render: (row) => row.department_name || <span style={{ color: "#8b8f9e" }}>Not set</span> },
+              {
+                key: "status",
+                label: "Status",
+                render: (row) =>
+                  row.status === "acknowledged" || row.status === "joined" ? (
+                    <StatusBadge status={row.status} />
+                  ) : (
+                    <span className={styles.gapText} style={{ fontWeight: 700 }}>Not yet acknowledged</span>
+                  ),
+              },
+              { key: "acknowledged_at", label: "Acknowledged", render: (row) => formatDate(row.acknowledged_at) },
+              {
+                key: "invite_token",
+                label: "Invite Link",
+                render: (row) => (
+                  <button type="button" className={styles.secondaryBtn} onClick={() => copyLink(row)}>
+                    {copiedId === row.id ? "✓ Copied" : "Copy link"}
+                  </button>
+                ),
+              },
+            ]}
+            rows={list.items}
+            rowId={(row) => row.id}
+            loading={list.loading}
+          />
+          <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
+          {modal && (
+            <FormModal
+              title="Invite Candidate"
+              fields={fields}
+              initialValues={{}}
+              submitLabel="Create Invite"
+              onCancel={() => setModal(null)}
+              onSubmit={async (values) => {
+                await submitJson("/api/v1/admin/candidates", token, "POST", values);
+                setToast("Candidate invited. Copy their link from the table below to send it on.");
+                setTimeout(() => setToast(""), 4000);
+                setModal(null); setReloadKey((k) => k + 1);
+              }}
+            />
+          )}
+        </>
+      )}
+      {tab === "content" && <PreboardingContentEditor token={token} />}
+    </section>
+  );
+}
+
+function PreboardingContentEditor({ token }: { token: string }) {
+  const [content, setContent] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState("");
+  useEffect(() => {
+    request<Record<string, string>>("/api/v1/admin/preboarding-content", token).then((data) => { setContent(data); setLoading(false); }).catch(() => setLoading(false));
+  }, [token]);
+
+  const blocks: [string, string][] = [
+    ["welcome", "Welcome message"],
+    ["expectations_from_you", "What we expect from you"],
+    ["expectations_from_us", "What you can expect from us"],
+  ];
+
+  async function save() {
+    setSaving(true);
+    try {
+      await submitJson("/api/v1/admin/preboarding-content", token, "PATCH", content);
+      setToast("Preview page content updated successfully.");
+      setTimeout(() => setToast(""), 3000);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <div className={styles.loading}>Synchronising verified data…</div>;
+  return (
+    <div className={styles.formGrid} style={{ display: "block" }}>
+      <Feedback toast={toast} />
+      <p style={{ color: "#7c8090", fontSize: 13, margin: "0 0 16px" }}>
+        This is what a candidate sees on their pre-joining preview page, before they have an account. Common Rules
+        &amp; Regulations aren&apos;t shown here yet — that&apos;s a separate module, not built in this pass.
+      </p>
+      {blocks.map(([key, label]) => (
+        <label key={key} style={{ display: "block", marginBottom: 18 }}>
+          <b style={{ display: "block", fontSize: 13, marginBottom: 6 }}>{label}</b>
+          <textarea
+            value={content[key] || ""}
+            onChange={(e) => setContent((prev) => ({ ...prev, [key]: e.target.value }))}
+            rows={4}
+            style={{ width: "100%", border: "1px solid #dfe0e8", borderRadius: 10, padding: "10px 13px", fontFamily: "inherit", fontSize: 14 }}
+          />
+        </label>
+      ))}
+      <button type="button" className={styles.primaryBtn} disabled={saving} onClick={save}>
+        {saving ? "Saving…" : "Save changes"}
+      </button>
+    </div>
+  );
+}
+
 function DepartmentsPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const list = useClientList<Department>(token, "/api/v1/admin/departments", ["name", "code"], reloadKey);
@@ -1810,6 +1955,7 @@ export default function AdminConsole({ token, section }: { token: string; sectio
   switch (section) {
     case "employees": return <EmployeesPanel token={token} />;
     case "departments": return <DepartmentsPanel token={token} />;
+    case "candidates": return <CandidatesPanel token={token} />;
     case "matrix": return <MatrixPanel token={token} />;
     case "training": return <TrainingPanel token={token} />;
     case "assignments": return <AssignmentsPanel token={token} />;

@@ -209,6 +209,43 @@ class ReadinessSnapshot(Base):
     captured_at: Mapped[date] = mapped_column(Date, default=date.today)
 
 
+# BUILD PROMPT v5 BLOCK A — mirrors Supabase's candidates /
+# preboarding_acknowledgments / org_preboarding_content. A candidate is
+# deliberately its own table, not a User with a status flag — they have
+# none of the fields a real employee needs (password_hash, role,
+# manager_id), and giving them a User row would mean every
+# employee-facing query has to remember to filter candidates back out.
+class Candidate(Base):
+    __tablename__ = "candidates"
+    __table_args__ = (UniqueConstraint("org_id", "email"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
+    full_name: Mapped[str] = mapped_column(String(160))
+    email: Mapped[str] = mapped_column(String(255))
+    invite_token: Mapped[str] = mapped_column(String(36), default=uid, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="invited")
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PreboardingAcknowledgment(Base):
+    __tablename__ = "preboarding_acknowledgments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id"), unique=True)
+    acknowledged_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+
+class OrgPreboardingContent(Base):
+    __tablename__ = "org_preboarding_content"
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), primary_key=True)
+    block_key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    body: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

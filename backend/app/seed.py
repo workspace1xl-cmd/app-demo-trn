@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, Organization, QuizQuestion, ReadinessSnapshot, TrainingModule, User
+from .models import Activity, Certificate, Department, Enrollment, MistakeRegisterEntry, OrgPreboardingContent, Organization, QuizQuestion, ReadinessSnapshot, TrainingModule, User
 from .security import hash_password
 
 
@@ -158,4 +158,12 @@ def seed_database(db: Session) -> None:
         noise = math.sin(days_ago * 0.6) * 3
         score = max(0, min(100, round(28 + progress * 40 + noise)))
         db.add(ReadinessSnapshot(org_id=org.id, score=score, components=[{"key": "training", "label": "Org-wide training completion", "percent": score}], captured_at=date.today() - timedelta(days=days_ago)))
+    # BUILD PROMPT v5 BLOCK A: default preboarding content so the public
+    # preview page has real copy on first load, matching the Supabase seed.
+    for block_key, body in [
+        ("welcome", "Welcome — we're glad you're considering joining us. This page gives you a clear picture of what to expect before you accept, so there are no surprises on day one."),
+        ("expectations_from_you", "We expect punctuality, ownership of your responsibilities once assigned, and honest communication when something is blocking you. Full role-specific expectations are shared once your department is confirmed."),
+        ("expectations_from_us", "You can expect a structured onboarding path, a named point of contact for every question, and transparency about how your role fits the wider organisation."),
+    ]:
+        db.add(OrgPreboardingContent(org_id=org.id, block_key=block_key, body=body))
     db.commit()

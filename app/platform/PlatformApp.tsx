@@ -36,6 +36,7 @@ export type AdminSection =
   | "overview"
   | "employees"
   | "departments"
+  | "candidates"
   | "matrix"
   | "training"
   | "assignments"
@@ -43,7 +44,7 @@ export type AdminSection =
   | "feedback"
   | "audit"
   | "exec";
-const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "matrix", "training", "assignments", "content", "feedback", "audit", "exec"];
+const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "candidates", "matrix", "training", "assignments", "content", "feedback", "audit", "exec"];
 // Ten flat tabs read as a wall of text — grouped here into 5 clusters
 // (icons + labels, current-section highlighted, sized to the "5-8
 // top-level items" guidance) purely as a navigation reorganisation.
@@ -51,7 +52,7 @@ const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments
 // changes how the tab bar presents them.
 const ADMIN_GROUPS: { key: string; label: string; icon: string; sections: [AdminSection, string][] }[] = [
   { key: "insights", label: "Insights", icon: "◈", sections: [["overview", "Overview"], ["exec", "Exec View"]] },
-  { key: "people", label: "People", icon: "◍", sections: [["employees", "Employees"], ["departments", "Departments"]] },
+  { key: "people", label: "People", icon: "◍", sections: [["employees", "Employees"], ["departments", "Departments"], ["candidates", "Candidates"]] },
   { key: "learning", label: "Learning", icon: "◎", sections: [["training", "Training & Quiz Builder"], ["assignments", "Assignments"], ["content", "Content Library"]] },
   { key: "ownership", label: "Ownership", icon: "⬡", sections: [["matrix", "Responsibility Matrix"]] },
   { key: "governance", label: "Governance", icon: "◉", sections: [["feedback", "Feedback Queue"], ["audit", "Audit Log"]] },
