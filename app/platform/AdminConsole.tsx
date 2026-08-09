@@ -2373,6 +2373,8 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
             try {
               await submitJson(`/api/v1/admin/onboarding-stages/${confirmDeleteStage.id}`, token, "DELETE");
               setConfirmDeleteStage(null); load();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not delete the stage.");
             } finally { setBusy(false); }
           }}
         />
@@ -2388,6 +2390,8 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
             try {
               await submitJson(`/api/v1/admin/onboarding-stage-items/${confirmDeleteItem.id}`, token, "DELETE");
               setConfirmDeleteItem(null); load();
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not delete the item.");
             } finally { setBusy(false); }
           }}
         />
