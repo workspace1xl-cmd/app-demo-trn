@@ -458,7 +458,11 @@ def manager_dashboard(user: User = Depends(current_user), db: Session = Depends(
         overdue = sum(1 for r in rows if r.due_date and r.due_date < today and r.status != "completed")
         percent = _round_half_up(completed / total_modules * 100) if total_modules else 0
         last_nudged = last_nudged_by_user.get(member.id)
-        members.append({"id": member.id, "name": member.full_name, "email": member.email, "department": dept_by_id.get(member.department_id), "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue, "last_nudged_at": last_nudged.isoformat() if last_nudged else None})
+        # QA REMEDIATION BLOCKER 3: mirrors the Edge Function — a manager
+        # could not previously see which of their reports had permanently
+        # failed a mandatory module (attempts exhausted without passing).
+        blocked_count = sum(1 for r in rows if r.onboarding_blocked)
+        members.append({"id": member.id, "name": member.full_name, "email": member.email, "department": dept_by_id.get(member.department_id), "training_percent": percent, "completed": completed, "total": total_modules, "overdue_count": overdue, "attempts_exhausted_count": blocked_count, "last_nudged_at": last_nudged.isoformat() if last_nudged else None})
     team_total = sum(m["total"] for m in members)
     team_completed = sum(m["completed"] for m in members)
     team_percent = _round_half_up(team_completed / team_total * 100) if team_total else 0
@@ -469,6 +473,7 @@ def manager_dashboard(user: User = Depends(current_user), db: Session = Depends(
         "team_readiness": team_readiness,
         "members": members,
         "overdue_total": sum(m["overdue_count"] for m in members),
+        "attempts_exhausted_total": sum(m["attempts_exhausted_count"] for m in members),
         "activities": [activity_dict(a) for a in activities],
         "has_reports": len(members) > 0,
     }

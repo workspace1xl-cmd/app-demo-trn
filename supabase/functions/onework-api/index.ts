@@ -448,7 +448,10 @@ Deno.serve(async (req) => {
       const teamDepartments = teamDeptIds.map((id) => ({ id, name: deptNameById.get(id) || "Unknown" })).sort((a, b) => a.name.localeCompare(b.name));
       const teamDeptNames = teamDepartments.map((d) => d.name);
       const [{ data: enrollments }, { data: activities }, { data: recentNudges }] = await Promise.all([
-        teamIds.length ? supabase.from("enrollments").select("user_id,status,due_date").eq("org_id", user.org_id).in("user_id", teamIds) : Promise.resolve({ data: [] as { user_id: string; status: string; due_date: string | null }[] }),
+        // QA REMEDIATION BLOCKER 3: onboarding_blocked selected alongside
+        // status/due_date — a manager could not previously see which of
+        // their reports had permanently failed a mandatory module.
+        teamIds.length ? supabase.from("enrollments").select("user_id,status,due_date,onboarding_blocked").eq("org_id", user.org_id).in("user_id", teamIds) : Promise.resolve({ data: [] as { user_id: string; status: string; due_date: string | null; onboarding_blocked: boolean }[] }),
         teamDeptNames.length ? supabase.from("activities").select("id,name,department,responsible_role,current_person,backup_person,contact_details,sla,escalation_level_1,escalation_level_2,sop_link,training_module_link,status").eq("org_id", user.org_id).in("department", teamDeptNames) : Promise.resolve({ data: [] as unknown[] }),
         // BUILD PROMPT v5 item B2: "nudged Nd ago" state so a manager can
         // see a nudge already went out instead of guessing whether to
@@ -465,7 +468,13 @@ Deno.serve(async (req) => {
         const completed = rows.filter((e) => e.status === "completed").length;
         const overdue = rows.filter((e) => e.due_date && e.due_date < today && e.status !== "completed").length;
         const percent = total ? Math.round((completed / total) * 100) : 0;
-        return { id: member.id, name: member.full_name, email: member.email, department: deptNameById.get(member.department_id) || null, training_percent: percent, completed, total, overdue_count: overdue, last_nudged_at: lastNudgedByUser.get(member.id) || null };
+        // QA REMEDIATION BLOCKER 3: "if he's failing on two or three
+        // occasions, we won't basically move ahead with him" — a manager
+        // needs to see this without going to Admin. Admin's Assignments
+        // panel already surfaces onboarding_blocked per-enrollment; this
+        // is the same signal rolled up per team member.
+        const blockedCount = rows.filter((e) => e.onboarding_blocked).length;
+        return { id: member.id, name: member.full_name, email: member.email, department: deptNameById.get(member.department_id) || null, training_percent: percent, completed, total, overdue_count: overdue, attempts_exhausted_count: blockedCount, last_nudged_at: lastNudgedByUser.get(member.id) || null };
       });
       const teamTotal = members.reduce((sum, m) => sum + m.total, 0), teamCompleted = members.reduce((sum, m) => sum + m.completed, 0);
       const teamReadiness = scoreFromComponents([{ key: "training", label: "Team training completion", percent: teamTotal ? Math.round((teamCompleted / teamTotal) * 100) : 0 }]);
@@ -474,6 +483,7 @@ Deno.serve(async (req) => {
         team_readiness: teamReadiness,
         members,
         overdue_total: members.reduce((sum, m) => sum + m.overdue_count, 0),
+        attempts_exhausted_total: members.reduce((sum, m) => sum + m.attempts_exhausted_count, 0),
         activities: activities || [],
         // Honesty signal for the UI: distinguishes "you have zero direct
         // or rolled-up reports" (a real, valid org state — nudge to ask

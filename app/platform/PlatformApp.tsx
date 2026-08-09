@@ -166,14 +166,18 @@ function renderMarkdownLite(text: string) {
 type Notification = { id: string; kind: string; subject: string; payload: Record<string, unknown>; created_at: string; read_at: string | null };
 type Certificate = { id: string; module: string; certificate_number: string; issued_at: string; expires_at: string };
 type AdminData = { employees: number; training_completion: number; certificates: number; average_quiz_score: number; activities: number; open_feedback: number; readiness: Readiness };
-type ManagerMember = { id: string; name: string; email: string; department: string | null; training_percent: number; completed: number; total: number; overdue_count: number; last_nudged_at: string | null };
+// QA REMEDIATION BLOCKER 3: attempts_exhausted_count — how many of this
+// person's mandatory modules they've permanently failed (attempts used
+// up without passing). Previously only visible to Admin; a manager had
+// no way to see it without asking.
+type ManagerMember = { id: string; name: string; email: string; department: string | null; training_percent: number; completed: number; total: number; overdue_count: number; attempts_exhausted_count: number; last_nudged_at: string | null };
 // BUILD PROMPT v5 item A3: `department` (singular) replaced with
 // `departments` (the set actually represented across the real
 // manager_id-derived team, which can span more than one) and
 // `has_reports` distinguishes "zero direct/rolled-up reports" — a real,
 // valid org state while manager_id assignment is still rolling out — from
 // a loading/error state.
-type ManagerData = { departments: { id: string; name: string }[]; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; activities: Activity[]; has_reports: boolean };
+type ManagerData = { departments: { id: string; name: string }[]; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; attempts_exhausted_total: number; activities: Activity[]; has_reports: boolean };
 type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | MyRule[] | MySubmission[] | AdminData | ManagerData | null;
 
 export async function request<T = PlatformData>(
@@ -1627,6 +1631,15 @@ export default function WorkingPlatform() {
                     . This is who actually reports to you (directly or through another
                     manager), not everyone in your department.
                   </p>
+                  {/* QA REMEDIATION BLOCKER 3: "if he's failing on two or
+                      three occasions, we won't basically move ahead with
+                      him" — a manager needs to see this without going to
+                      Admin. */}
+                  {managerData.attempts_exhausted_total > 0 && (
+                    <p style={{ color: "#c0392b", fontWeight: 700 }}>
+                      ⚠ {managerData.attempts_exhausted_total} module attempt{managerData.attempts_exhausted_total === 1 ? "" : "s"} exhausted across your team — see the Blocked column below.
+                    </p>
+                  )}
                 </div>
               </section>
               {!managerData.has_reports && (
@@ -1644,6 +1657,7 @@ export default function WorkingPlatform() {
                       <th>Department</th>
                       <th>Training</th>
                       <th>Overdue</th>
+                      <th>Blocked</th>
                       <th>Action</th>
                     </tr>
                   </thead>
@@ -1673,6 +1687,15 @@ export default function WorkingPlatform() {
                             {m.overdue_count}
                           </td>
                           <td>
+                            {m.attempts_exhausted_count > 0 ? (
+                              <small style={{ color: "#c0392b", fontWeight: 700 }}>
+                                {m.attempts_exhausted_count} exhausted
+                              </small>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td>
                             {m.overdue_count > 0 &&
                               (recentlyNudged ? (
                                 <small style={{ color: "#8b8f9e" }}>
@@ -1694,7 +1717,7 @@ export default function WorkingPlatform() {
                     })}
                     {managerData.members.length === 0 && (
                       <tr>
-                        <td colSpan={6} className={styles.noRecords}>
+                        <td colSpan={7} className={styles.noRecords}>
                           No records found.
                         </td>
                       </tr>

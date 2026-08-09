@@ -35,3 +35,4 @@ jobs:
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_department_scoping.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_module_sequential_lock.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_question_weighted_grading.py -q
+      - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_manager_attempts_exhausted_flag.py -q
