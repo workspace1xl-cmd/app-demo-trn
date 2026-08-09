@@ -785,7 +785,14 @@ Deno.serve(async (req) => {
         supabase.from("training_modules").select("*").eq("org_id", user.org_id).or(moduleFilters).limit(5),
         supabase.from("mistake_register").select("code,title,description,correct_practice,severity").eq("org_id", user.org_id).eq("status", "active").or(mistakeFilters).limit(3),
         supabase.from("knowledge_feedback").select("id,query,resolution,resolved_at").eq("org_id", user.org_id).eq("type", "query").eq("status", "resolved").or(resolvedQueryFilters).limit(3),
-        supabase.from("content_assets").select("id,title,description,message_subtype,external_url").eq("org_id", user.org_id).eq("kind", "onboarding_message").eq("status", "ready").or(messageFilters).limit(3),
+        // limit(8), not limit(3) like the other sources: every onboarding
+        // message title starts with "A Message From..." and "welcome"/
+        // "message" alone matches nearly every row, so a tight cap was
+        // crowding out the actual best match (e.g. searching "Co-Founder"
+        // returned three OTHER messages and never the co-founder ones).
+        // Leadership/HR messages are a small, bounded set per org — 8
+        // comfortably covers the seven types even with two co-founders.
+        supabase.from("content_assets").select("id,title,description,message_subtype,external_url").eq("org_id", user.org_id).eq("kind", "onboarding_message").eq("status", "ready").or(messageFilters).limit(8),
       ]);
       const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}${a.sop_link ? `; SOP: ${a.sop_link}` : ""}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`), ...(resolvedQueries || []).map((rq) => `Previously answered question "${rq.query}": ${rq.resolution}`), ...(messages || []).map((m) => `Leadership/HR message "${m.title}" (${m.message_subtype}): ${m.description || "no description"}`)].join("\n");
       const claude = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0) + (resolvedQueries?.length || 0) + (messages?.length || 0);
