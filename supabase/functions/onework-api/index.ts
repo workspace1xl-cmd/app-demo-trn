@@ -728,17 +728,27 @@ Deno.serve(async (req) => {
       const activityFilters = searchTerms.flatMap((term) => [`name.ilike.%${term}%`, `department.ilike.%${term}%`, `responsible_role.ilike.%${term}%`]).join(",");
       const moduleFilters = searchTerms.flatMap((term) => [`title.ilike.%${term}%`, `objective.ilike.%${term}%`, `code.ilike.%${term}%`]).join(",");
       const mistakeFilters = searchTerms.flatMap((term) => [`title.ilike.%${term}%`, `description.ilike.%${term}%`, `category.ilike.%${term}%`]).join(",");
+      // QA REMEDIATION BLOCKER 5: "when the query is answered, he is able
+      // to know things... he knows all the knowledge that is there." A
+      // resolved query previously only reached the original submitter via
+      // notification — nobody else could ever find it. Matched the exact
+      // same way as every other search source here (ILIKE across
+      // extracted terms), against both the original question text and
+      // the admin's resolution, so searching close to the original
+      // wording or close to the answer's own wording both find it.
+      const resolvedQueryFilters = searchTerms.flatMap((term) => [`query.ilike.%${term}%`, `resolution.ilike.%${term}%`]).join(",");
       // SOP documents live in SOPGalaxy, not a table this API queries — the
       // only SOP-related signal in context is each activity's own sop_link
       // (a plain URL), included inline below when present, not a separate
       // sop_documents lookup.
-      const [{ data: activities }, { data: modules }, { data: mistakes }] = await Promise.all([
+      const [{ data: activities }, { data: modules }, { data: mistakes }, { data: resolvedQueries }] = await Promise.all([
         supabase.from("activities").select("*").eq("org_id", user.org_id).or(activityFilters).limit(5),
         supabase.from("training_modules").select("*").eq("org_id", user.org_id).or(moduleFilters).limit(5),
         supabase.from("mistake_register").select("code,title,description,correct_practice,severity").eq("org_id", user.org_id).eq("status", "active").or(mistakeFilters).limit(3),
+        supabase.from("knowledge_feedback").select("id,query,resolution,resolved_at").eq("org_id", user.org_id).eq("type", "query").eq("status", "resolved").or(resolvedQueryFilters).limit(3),
       ]);
-      const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}${a.sop_link ? `; SOP: ${a.sop_link}` : ""}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`)].join("\n");
-      const claude = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0);
+      const context = [...(activities || []).map((a) => `Activity: ${a.name}; owner ${a.responsible_role}; contact ${a.contact_details}; SLA ${a.sla}; escalation ${a.escalation_level_1} then ${a.escalation_level_2}${a.sop_link ? `; SOP: ${a.sop_link}` : ""}`), ...(modules || []).map((m) => `Training: ${m.code} ${m.title}; ${m.objective}`), ...(mistakes || []).map((mk) => `Common mistake ${mk.code}: ${mk.title}. ${mk.description} Correct practice: ${mk.correct_practice}`), ...(resolvedQueries || []).map((rq) => `Previously answered question "${rq.query}": ${rq.resolution}`)].join("\n");
+      const claude = await claudeAnswer(safe, context); const count = (activities?.length || 0) + (modules?.length || 0) + (mistakes?.length || 0) + (resolvedQueries?.length || 0);
       // `escalate` now comes from a fixed STATUS: token Claude is asked to
       // emit first, parsed exactly — not guessed by regex-matching whatever
       // prose Claude happened to write. The regex approach was genuinely
@@ -748,7 +758,7 @@ Deno.serve(async (req) => {
       // calls, sometimes tripping the regex and sometimes not.
       const unresolved = count === 0 || (claude?.escalate ?? false);
       await audit(user, "knowledge.search", "search", undefined, { query: safe, result_count: count, ai_used: Boolean(claude), unresolved });
-      return json({ query: safe, answer: claude?.answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(claude), activities: activities || [], modules: modules || [], mistakes: mistakes || [], unresolved });
+      return json({ query: safe, answer: claude?.answer || (count ? `Verified results found for ${safe}. Use the official owner, channel and SLA below.` : "No confirmed answer was found. Report this question for owner review."), confidence: unresolved ? 0 : activities?.length ? .93 : .72, ai_used: Boolean(claude), activities: activities || [], modules: modules || [], mistakes: mistakes || [], resolved_queries: resolvedQueries || [], unresolved });
     }
 
     if (path === "/api/v1/feedback" && req.method === "POST") {

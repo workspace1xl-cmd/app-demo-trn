@@ -80,7 +80,11 @@ type Readiness = { score: number; components: ReadinessComponent[] };
 type Milestone = { key: string; label: string; fraction: number; achieved: boolean };
 type Gamification = { streak_days: number; milestones: Milestone[] };
 type DashboardData = { user: { name: string }; training: { percent: number; completed: number; total: number }; certificates: number; points: number; open_actions: number; readiness: Readiness; gamification?: Gamification };
-type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; unresolved?: boolean };
+// QA REMEDIATION BLOCKER 5: a resolved employee query, now a real
+// searchable/browsable knowledge entry — not just delivered back to the
+// original submitter as a notification.
+type ResolvedQuery = { id: string; query: string; resolution: string; resolved_at: string | null };
+type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; resolved_queries?: ResolvedQuery[]; unresolved?: boolean };
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
 type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; sop_url?: string | null; sop_label?: string | null; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
 
@@ -1226,6 +1230,19 @@ export default function WorkingPlatform() {
                       <em>
                         {a.escalation_level_1} → {a.escalation_level_2}
                       </em>
+                    </article>
+                  ))}
+                  {/* QA REMEDIATION BLOCKER 5: a previously resolved
+                      employee question, surfaced as real, browsable
+                      knowledge — not just delivered to whoever originally
+                      asked it. */}
+                  {searchData.resolved_queries?.map((rq) => (
+                    <article key={rq.id}>
+                      <div>
+                        <b>{rq.query}</b>
+                        <small>Previously answered{rq.resolved_at ? ` · ${formatDate(rq.resolved_at)}` : ""}</small>
+                      </div>
+                      <span>{rq.resolution}</span>
                     </article>
                   ))}
                 </section>
