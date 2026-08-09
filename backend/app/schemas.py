@@ -61,6 +61,7 @@ class ModuleCreate(BaseModel):
     refresher_months: int = Field(default=12, ge=0)
     sop_url: str | None = None
     sop_label: str | None = None
+    max_attempts: int | None = Field(default=None, gt=0)
 
 
 class DepartmentCreate(BaseModel):
@@ -117,6 +118,7 @@ class ModuleUpdate(BaseModel):
     status: str | None = None
     sop_url: str | None = None
     sop_label: str | None = None
+    max_attempts: int | None = Field(default=None, gt=0)
 
 
 class QuestionCreate(BaseModel):

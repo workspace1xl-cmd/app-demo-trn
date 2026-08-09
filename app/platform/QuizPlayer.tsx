@@ -5,8 +5,12 @@ import styles from "./platform.module.css";
 import { request } from "./PlatformApp";
 
 type QuizQuestion = { id: string; prompt: string; options: string[] };
-type QuizPayload = { module_id: string; title: string; passing_score: number; questions: QuizQuestion[] };
-type AttemptResult = { score: number; passed: boolean; passing_score: number; correct: number; total: number; explanations: string[] };
+// BUILD PROMPT v5 BLOCK F: max_attempts/attempts_used/attempts_remaining/
+// onboarding_blocked are shown upfront — before the employee starts —
+// not just discovered after they've already failed enough times to hit
+// a surprise block.
+type QuizPayload = { module_id: string; title: string; passing_score: number; questions: QuizQuestion[]; max_attempts: number; attempts_used: number; attempts_remaining: number; onboarding_blocked: boolean };
+type AttemptResult = { score: number; passed: boolean; passing_score: number; correct: number; total: number; explanations: string[]; max_attempts: number; attempts_used: number; attempts_remaining: number; onboarding_blocked: boolean };
 
 export default function QuizPlayer({
   moduleId,
@@ -68,10 +72,21 @@ export default function QuizPlayer({
           {loading && <div className={styles.loading}>Loading the assessment…</div>}
           {error && <div className={styles.error}>{error}</div>}
 
-          {!loading && quiz && !result && (
+          {!loading && quiz && !result && quiz.onboarding_blocked && (
+            <div className={styles.quizResult} data-passed="false">
+              <span>ATTEMPTS EXHAUSTED</span>
+              <h2>You&apos;ve used all {quiz.max_attempts} attempts without passing.</h2>
+              <p>Ask your admin or manager to reset your attempts for this assessment before trying again.</p>
+            </div>
+          )}
+          {!loading && quiz && !result && !quiz.onboarding_blocked && (
             <div className={styles.quizList}>
+              {/* BUILD PROMPT v5 BLOCK F: labelled score display — the
+                  scale, what it measures and the threshold, all stated
+                  up front, not just a bare number. */}
               <p className={styles.quizIntro}>
-                Answer every question, then submit. You need {quiz.passing_score}% to pass.
+                Answer every question, then submit. Score is the percentage of questions answered correctly — you
+                need {quiz.passing_score}% to pass. Attempts remaining: {quiz.attempts_remaining} of {quiz.max_attempts}.
               </p>
               {quiz.questions.map((question, index) => (
                 <div key={question.id} className={styles.quizQuestion}>
@@ -98,14 +113,20 @@ export default function QuizPlayer({
 
           {result && (
             <div className={styles.quizResult} data-passed={result.passed ? "true" : "false"}>
-              <span>{result.passed ? "✓ ASSESSMENT PASSED" : "RETAKE REQUIRED"}</span>
+              <span>{result.passed ? "✓ ASSESSMENT PASSED" : result.onboarding_blocked ? "ATTEMPTS EXHAUSTED" : "RETAKE REQUIRED"}</span>
+              {/* Labelled score display: the scale (percentage of
+                  questions answered correctly), what it measures
+                  (correct/total), and the threshold it's judged
+                  against — not a bare number. */}
               <h2>
-                {result.score}% · {result.correct}/{result.total} correct
+                Score: {result.score}% ({result.correct} of {result.total} correct) · Passing threshold: {result.passing_score}%
               </h2>
               <p>
                 {result.passed
                   ? "A certificate has been issued and the next module is now unlocked."
-                  : `You need ${result.passing_score}% to pass. Review the explanations below and retake when ready.`}
+                  : result.onboarding_blocked
+                    ? "You've used all your attempts without passing. Ask your admin or manager to reset your attempts before trying again."
+                    : `You need ${result.passing_score}% to pass. Review the explanations below and retake when ready — attempts remaining: ${result.attempts_remaining} of ${result.max_attempts}.`}
               </p>
               <ol className={styles.quizExplanations}>
                 {result.explanations.map((explanation, index) => (
@@ -118,17 +139,19 @@ export default function QuizPlayer({
         <div className={styles.modalFooter}>
           {!result ? (
             <>
-              {!loading && quiz && !allAnswered && (
+              {!loading && quiz && !quiz.onboarding_blocked && !allAnswered && (
                 <small style={{ marginRight: "auto", alignSelf: "center", color: "#7b7f8f" }}>
                   Select an answer for every question to continue.
                 </small>
               )}
               <button type="button" className={styles.secondaryBtn} onClick={onClose} disabled={submitting}>
-                Cancel
+                {quiz?.onboarding_blocked ? "Close" : "Cancel"}
               </button>
-              <button type="button" className={styles.primaryBtn} disabled={!allAnswered || submitting} onClick={submit}>
-                {submitting ? "Submitting…" : "Submit assessment"}
-              </button>
+              {!quiz?.onboarding_blocked && (
+                <button type="button" className={styles.primaryBtn} disabled={!allAnswered || submitting} onClick={submit}>
+                  {submitting ? "Submitting…" : "Submit assessment"}
+                </button>
+              )}
             </>
           ) : (
             <button type="button" className={styles.primaryBtn} onClick={() => onCompleted(result)}>
