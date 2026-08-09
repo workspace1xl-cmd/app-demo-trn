@@ -188,6 +188,56 @@ Deno.serve(async (req) => {
       return json({ access_token: token, token_type: "bearer", user: { id: created.admin_user_id, name: created.admin_full_name, email: created.admin_email, role: "admin", org_id: created.org_id, org_name: created.org_name } }, 201);
     }
 
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK A: Pre-Joining Portal — genuinely public,
+    // unauthenticated routes (a candidate has no account yet, so there is
+    // no session to check). Deliberately placed before the
+    // `authenticate(req)` gate below, same as login/signup above. Scoped
+    // entirely by invite_token, never by org/session — the token IS the
+    // credential.
+    // -------------------------------------------------------------------
+    const previewMatch = path.match(/^\/api\/v1\/public\/preview\/([0-9a-f-]+)$/i);
+    if (previewMatch && req.method === "GET") {
+      const { data: candidate } = await supabase.from("candidates").select("id,full_name,status,department_id,org_id").eq("invite_token", previewMatch[1]).maybeSingle();
+      if (!candidate) return json({ detail: "This invite link isn't valid. Ask whoever sent it for a new one." }, 404);
+      const [{ data: org }, { data: department }, { data: content }, { data: ack }] = await Promise.all([
+        supabase.from("organizations").select("name").eq("id", candidate.org_id).maybeSingle(),
+        candidate.department_id ? supabase.from("departments").select("name").eq("id", candidate.department_id).maybeSingle() : Promise.resolve({ data: null }),
+        supabase.from("org_preboarding_content").select("block_key,body").eq("org_id", candidate.org_id),
+        supabase.from("preboarding_acknowledgments").select("acknowledged_at").eq("candidate_id", candidate.id).maybeSingle(),
+      ]);
+      const blocks = Object.fromEntries((content || []).map((c) => [c.block_key, c.body]));
+      return json({
+        candidate_name: candidate.full_name,
+        org_name: org?.name || "the organisation",
+        department_name: department?.name || null,
+        welcome: blocks.welcome || "",
+        expectations_from_you: blocks.expectations_from_you || "",
+        expectations_from_us: blocks.expectations_from_us || "",
+        // Block D (Rules & Regulations) doesn't exist yet — the preview
+        // page must not silently show an empty "rules" section as if
+        // there were none; this flag lets the UI say so honestly instead.
+        rules_available: false,
+        already_acknowledged: Boolean(ack),
+        acknowledged_at: ack?.acknowledged_at || null,
+      });
+    }
+    const ackMatch = path.match(/^\/api\/v1\/public\/preview\/([0-9a-f-]+)\/acknowledge$/i);
+    if (ackMatch && req.method === "POST") {
+      const { data: candidate } = await supabase.from("candidates").select("id").eq("invite_token", ackMatch[1]).maybeSingle();
+      if (!candidate) return json({ detail: "This invite link isn't valid. Ask whoever sent it for a new one." }, 404);
+      // Idempotent: re-submitting an already-acknowledged link succeeds
+      // quietly rather than erroring — a candidate double-clicking or
+      // reloading the confirmation page is a real, expected case, not
+      // something that should surface as a failure.
+      const { data: existing } = await supabase.from("preboarding_acknowledgments").select("acknowledged_at").eq("candidate_id", candidate.id).maybeSingle();
+      if (!existing) {
+        await supabase.from("preboarding_acknowledgments").insert({ candidate_id: candidate.id, ip_address: req.headers.get("x-forwarded-for"), user_agent: req.headers.get("user-agent") });
+        await supabase.from("candidates").update({ status: "acknowledged" }).eq("id", candidate.id);
+      }
+      return json({ ok: true });
+    }
+
     const user = await authenticate(req);
     if (!user) return json({ detail: "Authentication required." }, 401);
     const isAdmin = ["admin", "content_admin"].includes(user.role);
@@ -634,6 +684,49 @@ Deno.serve(async (req) => {
       if (error) throw error;
       return json(data || []);
     }
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK A: admin side — invite candidates, see who's
+    // acknowledged, edit the preview page's content blocks.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/admin/candidates" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const [{ data: candidates, error }, { data: departments }, { data: acks }] = await Promise.all([
+        supabase.from("candidates").select("id,full_name,email,department_id,invite_token,status,created_at").eq("org_id", user.org_id).order("created_at", { ascending: false }),
+        supabase.from("departments").select("id,name").eq("org_id", user.org_id),
+        supabase.from("preboarding_acknowledgments").select("candidate_id,acknowledged_at"),
+      ]);
+      if (error) throw error;
+      const deptById = new Map((departments || []).map((d) => [d.id, d.name]));
+      const ackByCandidate = new Map((acks || []).map((a) => [a.candidate_id, a.acknowledged_at]));
+      return json((candidates || []).map((c) => ({ ...c, department_name: c.department_id ? deptById.get(c.department_id) || null : null, acknowledged_at: ackByCandidate.get(c.id) || null })));
+    }
+    if (path === "/api/v1/admin/candidates" && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      if (!body.full_name?.trim()) return fieldError("full_name", "Full Name is required.");
+      if (!body.email?.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) return fieldError("email", "Enter a valid Email ID.");
+      const { data, error } = await supabase.from("candidates").insert({ org_id: user.org_id, full_name: body.full_name.trim(), email: body.email.trim().toLowerCase(), department_id: body.department_id || null, created_by: user.id }).select().single();
+      if (error) return json({ detail: error.message?.includes("duplicate") ? "A candidate with this Email ID has already been invited." : "Could not create the invite." }, 409);
+      await audit(user, "candidate.invite", "candidate", data.id, { email: data.email });
+      return json(data, 201);
+    }
+    if (path === "/api/v1/admin/preboarding-content" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data } = await supabase.from("org_preboarding_content").select("block_key,body").eq("org_id", user.org_id);
+      return json(Object.fromEntries((data || []).map((c) => [c.block_key, c.body])));
+    }
+    if (path === "/api/v1/admin/preboarding-content" && req.method === "PATCH") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      const allowed = ["welcome", "expectations_from_you", "expectations_from_us"];
+      const rows = allowed.filter((k) => body[k] !== undefined).map((k) => ({ org_id: user.org_id, block_key: k, body: String(body[k]), updated_at: new Date().toISOString() }));
+      if (!rows.length) return json({ detail: "Nothing to update." }, 400);
+      const { error } = await supabase.from("org_preboarding_content").upsert(rows, { onConflict: "org_id,block_key" });
+      if (error) throw error;
+      await audit(user, "preboarding_content.update", "organization", user.org_id, { blocks: rows.map((r) => r.block_key) });
+      return json({ ok: true });
+    }
+
     if (path === "/api/v1/admin/employees" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const query = rawUrl.searchParams.get("q");
