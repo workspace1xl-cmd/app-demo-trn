@@ -1987,7 +1987,18 @@ function ReadinessRing({
         aria-expanded={open}
         aria-label={`Readiness score ${readiness.score} out of 100 — ${caption}. Activate for a breakdown.`}
       >
-        <b>{readiness.score}</b>
+        {/* QA REMEDIATION HIGH 10: "you're giving me a score of 59, but...
+            what is that score for? Who is it valid to? How from how much
+            is that score?" The 0-100 scale and the >=70 "on track"
+            threshold already existed in code (the aria-label and the
+            colour-tone cutoff below) but only as an invisible
+            accessibility label — nothing sighted showed it as real UI
+            copy. Now visible on every ReadinessRing (employee dashboard,
+            Admin, Manager — one shared component). */}
+        <b>
+          {readiness.score}
+          <span className={styles.scoreScale}>/100</span>
+        </b>
         <small>{caption}</small>
       </button>
       {open && (
@@ -2013,7 +2024,11 @@ function ReadinessRing({
               );
             })}
           </ul>
-          <p>Average of the components above that currently apply. Click a component with an arrow to see who&apos;s behind it.</p>
+          <p>
+            Average of the components above that currently apply, out of 100. 70 and above is on track (shown in
+            green); below 70 needs attention (shown in red). Click a component with an arrow to see who&apos;s behind
+            it.
+          </p>
         </div>
       )}
     </div>
