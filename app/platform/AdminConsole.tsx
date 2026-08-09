@@ -1558,19 +1558,37 @@ function AssignModal({ token, modules, employees, onCancel, onAssigned }: { toke
 // Unresolved-question governance queue
 // ---------------------------------------------------------------------------
 
-type FeedbackRow = { id: string; query: string; reason: string; status: string; resolution: string | null; employee: string; created_at: string };
+type FeedbackRow = { id: string; type: string; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; employee: string; created_at: string };
+
+const QUERY_STATUSES = ["open", "in_review", "resolved", "dismissed"];
+// BUILD PROMPT v5 BLOCK G: the same 5-state lifecycle Block D's Rules &
+// Regulations suggestion review queue uses — one vocabulary app-wide.
+const SUGGESTION_STATUSES_G = ["submitted", "under_review", "accepted", "rejected", "implementation_pending", "implemented"];
 
 function FeedbackPanel({ token }: { token: string }) {
+  const [tab, setTab] = useState<"queries" | "suggestions">("queries");
+  return (
+    <section>
+      <div className={styles.adminSubTabs}>
+        <button type="button" data-active={tab === "queries"} onClick={() => setTab("queries")}>Queries</button>
+        <button type="button" data-active={tab === "suggestions"} onClick={() => setTab("suggestions")}>Suggestions</button>
+      </div>
+      {tab === "queries" ? <FeedbackQueueTab token={token} /> : <SuggestionQueueTab token={token} />}
+    </section>
+  );
+}
+
+function FeedbackQueueTab({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [statusFilter, setStatusFilter] = useState("open");
-  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&status=${statusFilter}`, reloadKey, statusFilter);
+  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&type=query&status=${statusFilter}`, reloadKey, statusFilter);
   const [resolveRow, setResolveRow] = useState<FeedbackRow | null>(null);
   const [toast, setToast] = useState("");
 
   return (
-    <section>
+    <>
       <div className={styles.adminTabs} style={{ borderBottom: "none", marginBottom: 12 }}>
-        {["open", "in_review", "resolved", "dismissed"].map((status) => (
+        {QUERY_STATUSES.map((status) => (
           <button key={status} className={statusFilter === status ? styles.adminTabActive : ""} onClick={() => setStatusFilter(status)}>
             {status.replace(/_/g, " ")}
           </button>
@@ -1610,7 +1628,69 @@ function FeedbackPanel({ token }: { token: string }) {
           }}
         />
       )}
-    </section>
+    </>
+  );
+}
+
+function SuggestionQueueTab({ token }: { token: string }) {
+  const [reloadKey, setReloadKey] = useState(0);
+  const [statusFilter, setStatusFilter] = useState("submitted");
+  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&type=suggestion&status=${statusFilter}`, reloadKey, statusFilter);
+  const [reviewRow, setReviewRow] = useState<FeedbackRow | null>(null);
+  const [toast, setToast] = useState("");
+
+  return (
+    <>
+      <div className={styles.adminTabs} style={{ borderBottom: "none", marginBottom: 12 }}>
+        {SUGGESTION_STATUSES_G.map((status) => (
+          <button key={status} className={statusFilter === status ? styles.adminTabActive : ""} onClick={() => setStatusFilter(status)}>
+            {status.replace(/_/g, " ")}
+          </button>
+        ))}
+      </div>
+      <Feedback error={list.error} toast={toast} />
+      <DataTable
+        columns={[
+          { key: "query", label: "Suggestion", render: (row) => (<><b>{row.query}</b><small>Suggested by {row.employee} · {row.reason}</small></>) },
+          { key: "target_implementation_date", label: "Target Date", render: (row) => formatDate(row.target_implementation_date) },
+          { key: "rejection_reason", label: "Rejection Reason", render: (row) => row.rejection_reason || "—" },
+        ]}
+        rows={list.items}
+        rowId={(row) => row.id}
+        loading={list.loading}
+        actions={(row) => (
+          ["accepted", "rejected", "implemented"].includes(row.status)
+            ? <span style={{ fontSize: 8, color: "#8b8f9e" }}>Closed</span>
+            : <button className={styles.secondaryBtn} onClick={() => setReviewRow(row)}>Review</button>
+        )}
+      />
+      <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
+      {reviewRow && (
+        <FormModal
+          title={`Review — ${reviewRow.query}`}
+          fields={[
+            { key: "status", label: "Decision", type: "select", required: true, options: [
+              { value: "under_review", label: "Under Review" },
+              { value: "accepted", label: "Accepted" },
+              { value: "rejected", label: "Rejected" },
+              { value: "implementation_pending", label: "Implementation Pending" },
+              { value: "implemented", label: "Implemented" },
+            ] },
+            { key: "rejection_reason", label: "Rejection Reason", type: "textarea", helpText: "Required when Decision is Rejected." },
+            { key: "target_implementation_date", label: "Target Implementation Date", type: "date" },
+          ]}
+          initialValues={{ status: "under_review", target_implementation_date: reviewRow.target_implementation_date || "" }}
+          submitLabel="Save Decision"
+          onCancel={() => setReviewRow(null)}
+          onSubmit={async (values) => {
+            if (values.status === "rejected" && !values.rejection_reason?.trim()) throw Object.assign(new Error("A reason is required when rejecting a suggestion."), { field: "rejection_reason" });
+            await submitJson(`/api/v1/admin/feedback/${reviewRow.id}`, token, "PATCH", values);
+            setToast("Decision saved successfully."); setTimeout(() => setToast(""), 3000);
+            setReviewRow(null); setReloadKey((k) => k + 1);
+          }}
+        />
+      )}
+    </>
   );
 }
 

@@ -173,6 +173,14 @@ class KnowledgeFeedback(Base, TimestampMixin):
     resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # BUILD PROMPT v5 BLOCK G: 'query' keeps the original open/in_review/
+    # resolved/dismissed lifecycle untouched; 'suggestion' uses the same
+    # 5-state lifecycle as Rule.published_version_id's sibling table,
+    # RuleChangeSuggestion (submitted -> under_review -> accepted/rejected
+    # -> implementation_pending -> implemented).
+    type: Mapped[str] = mapped_column(String(20), default="query")
+    target_implementation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class MistakeRegisterEntry(Base, TimestampMixin):

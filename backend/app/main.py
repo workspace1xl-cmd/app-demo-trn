@@ -765,7 +765,33 @@ async def knowledge_search(payload: SearchRequest, user: User = Depends(current_
 
 @app.post("/api/v1/feedback", status_code=201)
 def create_feedback(payload: FeedbackRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    item = KnowledgeFeedback(org_id=user.org_id, user_id=user.id, query=payload.query, reason=payload.reason, routed_to="Knowledge governance queue"); db.add(item); db.flush(); audit(db, user, "feedback.create", "knowledge_feedback", item.id); db.commit(); return {"id": item.id, "status": item.status, "routed_to": item.routed_to}
+    item = KnowledgeFeedback(org_id=user.org_id, user_id=user.id, query=payload.query, reason=payload.reason, type="query", routed_to="Knowledge governance queue"); db.add(item); db.flush(); audit(db, user, "feedback.create", "knowledge_feedback", item.id); db.commit(); return {"id": item.id, "status": item.status, "routed_to": item.routed_to}
+
+
+# ---------------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — the general-purpose
+# suggestion flow. Reuses KnowledgeFeedback's query/reason columns: query
+# holds the suggestion's description, reason holds the category.
+# ---------------------------------------------------------------------------
+@app.post("/api/v1/submissions", status_code=201)
+def create_submission(payload: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    description = str(payload.get("description") or "").strip()
+    if not description:
+        raise HTTPException(400, {"detail": "Describe your suggestion.", "field": "description"})
+    item = KnowledgeFeedback(org_id=user.org_id, user_id=user.id, query=description, reason=str(payload.get("category") or "general").strip(), type="suggestion", status="submitted", routed_to="Suggestions & queries queue")
+    db.add(item); db.flush(); audit(db, user, "submission.create", "knowledge_feedback", item.id, {"type": "suggestion"}); db.commit()
+    return {"id": item.id, "status": item.status, "routed_to": item.routed_to}
+
+
+@app.get("/api/v1/submissions/mine")
+def my_submissions(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.user_id == user.id).order_by(KnowledgeFeedback.created_at.desc())).all()
+    return [
+        {"id": r.id, "type": r.type, "query": r.query, "reason": r.reason, "status": r.status, "resolution": r.resolution,
+         "rejection_reason": r.rejection_reason, "target_implementation_date": r.target_implementation_date.isoformat() if r.target_implementation_date else None,
+         "created_at": r.created_at.isoformat(), "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None}
+        for r in rows
+    ]
 
 
 # BUILD PROMPT v5 BLOCK F: org-wide default max quiz attempts — a
@@ -1427,23 +1453,44 @@ def assign_module(payload: AssignRequest, user: User = Depends(admin_user), db: 
 # Administrator: unresolved-question governance queue
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/admin/feedback")
-def list_feedback(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), status_filter: str = Query(default="open", alias="status"), user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    stmt = select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.status == status_filter).order_by(KnowledgeFeedback.created_at.desc())
+def list_feedback(page: int = Query(default=1, ge=1), page_size: int = Query(default=20), status_filter: str | None = Query(default=None, alias="status"), type_filter: str = Query(default="query", alias="type"), user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    status_value = status_filter or ("submitted" if type_filter == "suggestion" else "open")
+    stmt = select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.type == type_filter, KnowledgeFeedback.status == status_value).order_by(KnowledgeFeedback.created_at.desc())
     rows, meta = paginate_query(stmt, db, page, page_size)
     employees = {u.id: u.full_name for u in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
     return {"items": [{**row_dict(item), "employee": employees.get(item.user_id, "Unknown")} for item in rows], **meta}
 
 
 @app.patch("/api/v1/admin/feedback/{feedback_id}")
-def resolve_feedback(feedback_id: str, payload: FeedbackResolve, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+def resolve_feedback(feedback_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
     item = db.scalar(select(KnowledgeFeedback).where(KnowledgeFeedback.id == feedback_id, KnowledgeFeedback.org_id == user.org_id))
-    if not item: raise HTTPException(404, "Feedback item not found.")
-    if payload.status not in {"resolved", "dismissed", "in_review"}: raise HTTPException(400, {"detail": "Select a valid status.", "field": "status"})
-    if payload.status != "in_review" and not payload.resolution: raise HTTPException(400, {"detail": "Resolution notes are required.", "field": "resolution"})
-    item.status = payload.status
-    if payload.status != "in_review":
-        item.resolution = payload.resolution; item.resolved_by = user.id; item.resolved_at = datetime.utcnow()
-    db.flush(); audit(db, user, "feedback.resolve", "knowledge_feedback", item.id, {"status": payload.status}); db.commit(); return row_dict(item)
+    if not item: raise HTTPException(404, "Item not found.")
+    status = payload.get("status")
+    if item.type == "suggestion":
+        # BUILD PROMPT v5 BLOCK G: the same 5-state lifecycle
+        # RuleChangeSuggestion uses. Mandatory rejection reason.
+        if status not in {"under_review", "accepted", "rejected", "implementation_pending", "implemented"}:
+            raise HTTPException(400, {"detail": "Choose a valid status.", "field": "status"})
+        if status == "rejected" and not str(payload.get("rejection_reason") or "").strip():
+            raise HTTPException(400, {"detail": "A reason is required when rejecting a suggestion.", "field": "rejection_reason"})
+        item.status = status
+        if status == "rejected": item.rejection_reason = str(payload["rejection_reason"]).strip()
+        if "target_implementation_date" in payload:
+            raw = payload["target_implementation_date"]
+            item.target_implementation_date = date.fromisoformat(raw) if raw else None
+        item.resolved_by = user.id; item.resolved_at = datetime.utcnow()
+    else:
+        if status not in {"resolved", "dismissed", "in_review"}: raise HTTPException(400, {"detail": "Select a valid status.", "field": "status"})
+        resolution = payload.get("resolution")
+        if status != "in_review" and not resolution: raise HTTPException(400, {"detail": "Resolution notes are required.", "field": "resolution"})
+        item.status = status
+        if status != "in_review":
+            item.resolution = resolution; item.resolved_by = user.id; item.resolved_at = datetime.utcnow()
+    db.flush()
+    # Notify the submitter — reuses the same Notification/notification_outbox
+    # table the bell dropdown already reads.
+    db.add(Notification(org_id=user.org_id, user_id=item.user_id, kind="submission_update", subject=f"Your {item.type} \"{item.query[:60]}\" is now {str(status).replace('_', ' ')}.", payload={"submission_id": item.id, "status": status}))
+    audit(db, user, "submission.review" if item.type == "suggestion" else "feedback.resolve", "knowledge_feedback", item.id, {"status": status}); db.commit(); return row_dict(item)
 
 
 # ---------------------------------------------------------------------------

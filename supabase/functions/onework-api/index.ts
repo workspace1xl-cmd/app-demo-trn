@@ -660,7 +660,29 @@ Deno.serve(async (req) => {
     }
 
     if (path === "/api/v1/feedback" && req.method === "POST") {
-      const body = await req.json(); const { data, error } = await supabase.from("knowledge_feedback").insert({ org_id: user.org_id, user_id: user.id, query: body.query, reason: body.reason, routed_to: "Knowledge governance queue" }).select().single(); if (error) throw error; await audit(user, "feedback.create", "knowledge_feedback", data.id); return json({ id: data.id, status: data.status, routed_to: data.routed_to }, 201);
+      const body = await req.json(); const { data, error } = await supabase.from("knowledge_feedback").insert({ org_id: user.org_id, user_id: user.id, query: body.query, reason: body.reason, type: "query", routed_to: "Knowledge governance queue" }).select().single(); if (error) throw error; await audit(user, "feedback.create", "knowledge_feedback", data.id); return json({ id: data.id, status: data.status, routed_to: data.routed_to }, 201);
+    }
+
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — the general-
+    // purpose suggestion flow (not tied to a specific rule; Block D's
+    // rule_change_suggestions stays as the rule-specific version). Reuses
+    // knowledge_feedback's query/reason columns: query holds the
+    // suggestion's title/description, reason holds the category/context
+    // — same columns, different meaning per type, same table either way.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/submissions" && req.method === "POST") {
+      const body = await req.json();
+      if (!body.description?.trim()) return fieldError("description", "Describe your suggestion.");
+      const { data, error } = await supabase.from("knowledge_feedback").insert({ org_id: user.org_id, user_id: user.id, query: body.description.trim(), reason: body.category?.trim() || "general", type: "suggestion", status: "submitted", routed_to: "Suggestions & queries queue" }).select().single();
+      if (error) throw error;
+      await audit(user, "submission.create", "knowledge_feedback", data.id, { type: "suggestion" });
+      return json({ id: data.id, status: data.status, routed_to: data.routed_to }, 201);
+    }
+    if (path === "/api/v1/submissions/mine" && req.method === "GET") {
+      const { data, error } = await supabase.from("knowledge_feedback").select("id,type,query,reason,status,resolution,rejection_reason,target_implementation_date,created_at,resolved_at").eq("org_id", user.org_id).eq("user_id", user.id).order("created_at", { ascending: false });
+      if (error) throw error;
+      return json(data || []);
     }
 
     // -------------------------------------------------------------------
@@ -1263,22 +1285,40 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     if (path === "/api/v1/admin/feedback" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const { page, pageSize, from, to } = paginate(rawUrl); const status = rawUrl.searchParams.get("status") || "open";
-      const { data, error, count } = await supabase.from("knowledge_feedback").select("id,query,reason,status,resolution,created_at,resolved_at,app_users!knowledge_feedback_user_id_fkey(full_name)", { count: "exact" }).eq("org_id", user.org_id).eq("status", status).order("created_at", { ascending: false }).range(from, to);
+      const { page, pageSize, from, to } = paginate(rawUrl);
+      const type = rawUrl.searchParams.get("type") || "query";
+      const status = rawUrl.searchParams.get("status") || (type === "suggestion" ? "submitted" : "open");
+      const { data, error, count } = await supabase.from("knowledge_feedback").select("id,type,query,reason,status,resolution,rejection_reason,target_implementation_date,created_at,resolved_at,app_users!knowledge_feedback_user_id_fkey(full_name)", { count: "exact" }).eq("org_id", user.org_id).eq("type", type).eq("status", status).order("created_at", { ascending: false }).range(from, to);
       if (error) throw error;
-      return json({ items: (data || []).map((item: any) => ({ id: item.id, query: item.query, reason: item.reason, status: item.status, resolution: item.resolution, created_at: item.created_at, resolved_at: item.resolved_at, employee: item.app_users?.full_name || "Unknown" })), page, page_size: pageSize, total: count || 0 });
+      return json({ items: (data || []).map((item: any) => ({ id: item.id, type: item.type, query: item.query, reason: item.reason, status: item.status, resolution: item.resolution, rejection_reason: item.rejection_reason, target_implementation_date: item.target_implementation_date, created_at: item.created_at, resolved_at: item.resolved_at, employee: item.app_users?.full_name || "Unknown" })), page, page_size: pageSize, total: count || 0 });
     }
     const feedbackMatch = path.match(/^\/api\/v1\/admin\/feedback\/([^/]+)$/);
     if (feedbackMatch && req.method === "PATCH") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data: existing } = await supabase.from("knowledge_feedback").select("id,type,user_id,query").eq("id", feedbackMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      if (!existing) return json({ detail: "Item not found." }, 404);
       const body = await req.json();
-      if (!["resolved","dismissed","in_review"].includes(body.status)) return fieldError("status", "Select a valid status.");
-      if (body.status !== "in_review" && !body.resolution?.trim()) return fieldError("resolution", "Resolution notes are required.");
       const patch: Record<string, unknown> = { status: body.status };
-      if (body.status !== "in_review") { patch.resolution = body.resolution.trim(); patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString(); }
-      const { data, error } = await supabase.from("knowledge_feedback").update(patch).eq("id", feedbackMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
-      if (error) throw error; if (!data) return json({ detail: "Feedback item not found." }, 404);
-      await audit(user, "feedback.resolve", "knowledge_feedback", data.id, { status: body.status }); return json(data);
+      if (existing.type === "suggestion") {
+        // BUILD PROMPT v5 BLOCK G: the same 5-state lifecycle Block D's
+        // rule_change_suggestions uses. Mandatory rejection reason —
+        // same rule as everywhere else rejection reasons are required.
+        if (!["under_review","accepted","rejected","implementation_pending","implemented"].includes(body.status)) return fieldError("status", "Choose a valid status.");
+        if (body.status === "rejected" && !body.rejection_reason?.trim()) return fieldError("rejection_reason", "A reason is required when rejecting a suggestion.");
+        if (body.status === "rejected") patch.rejection_reason = body.rejection_reason.trim();
+        if (body.target_implementation_date !== undefined) patch.target_implementation_date = body.target_implementation_date || null;
+        patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString();
+      } else {
+        if (!["resolved","dismissed","in_review"].includes(body.status)) return fieldError("status", "Select a valid status.");
+        if (body.status !== "in_review" && !body.resolution?.trim()) return fieldError("resolution", "Resolution notes are required.");
+        if (body.status !== "in_review") { patch.resolution = body.resolution.trim(); patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString(); }
+      }
+      const { data, error } = await supabase.from("knowledge_feedback").update(patch).eq("id", feedbackMatch[1]).select().maybeSingle();
+      if (error) throw error; if (!data) return json({ detail: "Item not found." }, 404);
+      // Notify the submitter — reuses the same notification_outbox the
+      // bell dropdown already reads (Block G's "notification integration").
+      await supabase.from("notification_outbox").insert({ org_id: user.org_id, user_id: existing.user_id, kind: "submission_update", subject: `Your ${existing.type} "${existing.query.slice(0, 60)}" is now ${String(body.status).replace(/_/g, " ")}.`, payload: { submission_id: data.id, status: body.status } });
+      await audit(user, existing.type === "suggestion" ? "submission.review" : "feedback.resolve", "knowledge_feedback", data.id, { status: body.status }); return json(data);
     }
 
     // -------------------------------------------------------------------

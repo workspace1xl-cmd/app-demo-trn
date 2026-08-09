@@ -30,9 +30,10 @@ type View =
   | "graph"
   | "certificates"
   | "rules"
+  | "submissions"
   | "manager"
   | "admin";
-const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "graph", "certificates", "rules", "manager", "admin"];
+const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "graph", "certificates", "rules", "submissions", "manager", "admin"];
 export type AdminSection =
   | "overview"
   | "employees"
@@ -93,6 +94,9 @@ type Journey = { stages: JourneyStage[]; journey_complete: boolean };
 
 // BUILD PROMPT v5 BLOCK D: Rules & Regulations.
 type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; sop_url?: string | null; sop_label?: string | null; read: boolean };
+
+// BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — "My Submissions".
+type MySubmission = { id: string; type: "query" | "suggestion"; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; created_at: string; resolved_at: string | null };
 
 // BUILD PROMPT v5 BLOCK E: a plain URL into SOPGalaxy, same "render as a
 // real link only when it looks like one" convention already used for
@@ -165,7 +169,7 @@ type ManagerMember = { id: string; name: string; email: string; department: stri
 // valid org state while manager_id assignment is still rolling out — from
 // a loading/error state.
 type ManagerData = { departments: { id: string; name: string }[]; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; activities: Activity[]; has_reports: boolean };
-type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | MyRule[] | AdminData | ManagerData | null;
+type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | MyRule[] | MySubmission[] | AdminData | ManagerData | null;
 
 export async function request<T = PlatformData>(
   path: string,
@@ -428,6 +432,7 @@ export default function WorkingPlatform() {
       graph: "/api/v1/activities",
       certificates: "/api/v1/certificates",
       rules: "/api/v1/rules",
+      submissions: "/api/v1/submissions/mine",
       manager: "/api/v1/manager/dashboard",
       admin: "/api/v1/admin/analytics",
     };
@@ -501,6 +506,29 @@ export default function WorkingPlatform() {
       setError(e instanceof Error ? e.message : "Could not submit your suggestion.");
     } finally {
       setSuggestBusy(false);
+    }
+  }
+
+  // BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — "My Submissions".
+  const [newSubmissionOpen, setNewSubmissionOpen] = useState(false);
+  const [submissionDescription, setSubmissionDescription] = useState("");
+  const [submissionCategory, setSubmissionCategory] = useState("");
+  const [submissionBusy, setSubmissionBusy] = useState(false);
+  const [submissionToast, setSubmissionToast] = useState("");
+
+  async function submitNewSuggestion() {
+    if (!session || !submissionDescription.trim()) return;
+    setSubmissionBusy(true);
+    try {
+      await request("/api/v1/submissions", session.access_token, { method: "POST", body: JSON.stringify({ description: submissionDescription.trim(), category: submissionCategory.trim() || undefined }) });
+      setSubmissionToast("Your suggestion has been submitted for review.");
+      setTimeout(() => setSubmissionToast(""), 4000);
+      setNewSubmissionOpen(false); setSubmissionDescription(""); setSubmissionCategory("");
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not submit your suggestion.");
+    } finally {
+      setSubmissionBusy(false);
     }
   }
 
@@ -728,6 +756,7 @@ export default function WorkingPlatform() {
     ["graph", "⬡", "Responsibility graph"],
     ["certificates", "◇", "Certificates"],
     ["rules", "▦", "Rules & Regulations"],
+    ["submissions", "✎", "My Submissions"],
     ...(session.user.role === "manager" || session.user.role === "admin"
       ? [["manager", "◫", "My team"] as [View, string, string]]
       : []),
@@ -745,6 +774,7 @@ export default function WorkingPlatform() {
   const fullGraphData = view === "graph" && Array.isArray(data) ? data as Activity[] : null;
   const certificateData = view === "certificates" && Array.isArray(data) ? data as Certificate[] : null;
   const rulesData = view === "rules" && Array.isArray(data) ? data as MyRule[] : null;
+  const submissionsData = view === "submissions" && Array.isArray(data) ? data as MySubmission[] : null;
   const adminData = view === "admin" ? data as AdminData | null : null;
   const managerData =
     view === "manager" && data && !Array.isArray(data) && "members" in data ? (data as ManagerData) : null;
@@ -1373,6 +1403,70 @@ export default function WorkingPlatform() {
                       <button type="button" className={styles.journeyLinkBtn} onClick={() => setOpenRuleId((id) => (id === rule.id ? null : rule.id))}>
                         {openRuleId === rule.id ? "Collapse" : "View →"}
                       </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {/* BUILD PROMPT v5 BLOCK G: My Submissions — every query and
+              suggestion this employee has ever raised, in one place. */}
+          {submissionsData && (
+            <div className={styles.journeyShell}>
+              {submissionToast && <div className={styles.toast}>{submissionToast}</div>}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+                <p style={{ color: "#7c8090", fontSize: 13, margin: 0, maxWidth: 520 }}>
+                  Questions you&apos;ve reported and improvement suggestions you&apos;ve submitted, with their current status.
+                </p>
+                <button type="button" className={styles.primaryBtn} onClick={() => setNewSubmissionOpen((v) => !v)}>
+                  {newSubmissionOpen ? "Cancel" : "+ New Suggestion"}
+                </button>
+              </div>
+              {newSubmissionOpen && (
+                <div style={{ border: "1px solid #e8e9f0", borderRadius: 15, padding: "16px 18px", marginBottom: 18 }}>
+                  <label style={{ display: "block", marginBottom: 12 }}>
+                    <b style={{ display: "block", fontSize: 13, marginBottom: 6 }}>Describe your suggestion*</b>
+                    <textarea
+                      value={submissionDescription}
+                      onChange={(e) => setSubmissionDescription(e.target.value)}
+                      rows={3}
+                      style={{ width: "100%", border: "1px solid #dfe0e8", borderRadius: 10, padding: "10px 13px", fontFamily: "inherit", fontSize: 14 }}
+                    />
+                  </label>
+                  <label style={{ display: "block", marginBottom: 14 }}>
+                    <b style={{ display: "block", fontSize: 13, marginBottom: 6 }}>Category (optional)</b>
+                    <input
+                      value={submissionCategory}
+                      onChange={(e) => setSubmissionCategory(e.target.value)}
+                      placeholder="e.g. product, process, policy"
+                      style={{ width: "100%", border: "1px solid #dfe0e8", borderRadius: 10, padding: "10px 13px", fontFamily: "inherit", fontSize: 14 }}
+                    />
+                  </label>
+                  <button type="button" className={styles.primaryBtn} disabled={submissionBusy || !submissionDescription.trim()} onClick={submitNewSuggestion}>
+                    {submissionBusy ? "Submitting…" : "Submit Suggestion"}
+                  </button>
+                </div>
+              )}
+              {submissionsData.length === 0 && !newSubmissionOpen && (
+                <div className={styles.noRecords}>No records found. Nothing submitted yet.</div>
+              )}
+              <ul className={styles.journeyStages} style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {submissionsData.map((s) => (
+                  <li key={s.id} className={styles.journeyStage} data-status={["resolved", "accepted", "implemented"].includes(s.status) ? "completed" : "available"}>
+                    <div className={styles.journeyStageHead}>
+                      <span className={styles.journeyStageMark}>{s.type === "suggestion" ? "☆" : "?"}</span>
+                      <div style={{ flex: 1 }}>
+                        <h3>
+                          {s.query}
+                          <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: "#7058ff", background: "#eeeaff", padding: "3px 9px", borderRadius: 20, textTransform: "capitalize" }}>
+                            {s.status.replace(/_/g, " ")}
+                          </span>
+                        </h3>
+                        <p>{s.type === "suggestion" ? "Suggestion" : "Query"} · {s.reason}</p>
+                        {s.resolution && <p style={{ color: "#17182f", marginTop: 8 }}>Resolution: {s.resolution}</p>}
+                        {s.rejection_reason && <p style={{ color: "#c0392b", marginTop: 8 }}>Rejection reason: {s.rejection_reason}</p>}
+                        {s.target_implementation_date && <p style={{ color: "#17182f", marginTop: 8 }}>Target implementation date: {formatDate(s.target_implementation_date)}</p>}
+                      </div>
                     </div>
                   </li>
                 ))}
