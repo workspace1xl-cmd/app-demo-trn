@@ -291,11 +291,21 @@ Deno.serve(async (req) => {
     if (previewMatch && req.method === "GET") {
       const { data: candidate } = await supabase.from("candidates").select("id,full_name,status,department_id,org_id").eq("invite_token", previewMatch[1]).maybeSingle();
       if (!candidate) return json({ detail: "This invite link isn't valid. Ask whoever sent it for a new one." }, 404);
-      const [{ data: org }, { data: department }, { data: content }, { data: ack }] = await Promise.all([
+      // QA REMEDIATION BLOCKER 7 (+ Step 0a): rules_available was
+      // hardcoded false forever — a leftover from before Block D (Rules
+      // & Regulations) existed, never wired up once it shipped. Now a
+      // real query: the same org-wide-or-candidate's-department
+      // visibility rule the employee-facing /api/v1/rules route already
+      // uses. Only mandatory rules are shown here — a candidate hasn't
+      // joined yet, so this is a heads-up preview ("here's what you'll
+      // be expected to know"), not the full active regulations list they
+      // get once onboarded.
+      const [{ data: org }, { data: department }, { data: content }, { data: ack }, { data: rules }] = await Promise.all([
         supabase.from("organizations").select("name").eq("id", candidate.org_id).maybeSingle(),
         candidate.department_id ? supabase.from("departments").select("name").eq("id", candidate.department_id).maybeSingle() : Promise.resolve({ data: null }),
         supabase.from("org_preboarding_content").select("block_key,body").eq("org_id", candidate.org_id),
         supabase.from("preboarding_acknowledgments").select("acknowledged_at").eq("candidate_id", candidate.id).maybeSingle(),
+        supabase.from("rules").select("title,category").eq("org_id", candidate.org_id).eq("status", "active").eq("is_mandatory", true).or(`department_id.is.null,department_id.eq.${candidate.department_id || "00000000-0000-0000-0000-000000000000"}`).order("category"),
       ]);
       const blocks = Object.fromEntries((content || []).map((c) => [c.block_key, c.body]));
       return json({
@@ -305,10 +315,8 @@ Deno.serve(async (req) => {
         welcome: blocks.welcome || "",
         expectations_from_you: blocks.expectations_from_you || "",
         expectations_from_us: blocks.expectations_from_us || "",
-        // Block D (Rules & Regulations) doesn't exist yet — the preview
-        // page must not silently show an empty "rules" section as if
-        // there were none; this flag lets the UI say so honestly instead.
-        rules_available: false,
+        rules_available: Boolean(rules?.length),
+        rules: (rules || []).map((r) => ({ title: r.title, category: r.category })),
         already_acknowledged: Boolean(ack),
         acknowledged_at: ack?.acknowledged_at || null,
       });

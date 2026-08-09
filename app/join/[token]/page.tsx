@@ -11,6 +11,12 @@ import styles from "./join.module.css";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// QA REMEDIATION BLOCKER 7: real mandatory rules & regulations, not a
+// hardcoded "not published yet" note — resolved from the same
+// org-wide-or-department visibility rule the employee-facing Rules &
+// Regulations screen uses.
+type PreviewRule = { title: string; category: string };
+
 type Preview = {
   candidate_name: string;
   org_name: string;
@@ -19,6 +25,7 @@ type Preview = {
   expectations_from_you: string;
   expectations_from_us: string;
   rules_available: boolean;
+  rules: PreviewRule[];
   already_acknowledged: boolean;
   acknowledged_at: string | null;
 };
@@ -103,10 +110,25 @@ export default function JoinPreviewPage() {
           <p>{preview.expectations_from_us}</p>
         </section>
 
-        {!preview.rules_available && (
+        {preview.rules_available ? (
+          <section className={styles.block}>
+            <h2>Rules &amp; regulations you&apos;ll be expected to follow</h2>
+            <p>
+              These are the organisation&apos;s mandatory rules that apply to you — the full detail, plus anything
+              department-specific, is covered as part of onboarding once you join.
+            </p>
+            <ul>
+              {preview.rules.map((rule, index) => (
+                <li key={index}>
+                  <b>{rule.title}</b> <small>({rule.category})</small>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : (
           <div className={styles.note}>
-            The detailed rules &amp; regulations list isn&apos;t published to this preview yet — you&apos;ll get the full,
-            department-specific list as part of onboarding once you join.
+            No mandatory rules are published for this organisation yet — you&apos;ll get the full, department-specific
+            list as part of onboarding once you join.
           </div>
         )}
 

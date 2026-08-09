@@ -212,6 +212,13 @@ def public_preview(token: str, db: Session = Depends(get_db)):
     department = db.get(Department, candidate.department_id) if candidate.department_id else None
     content = {c.block_key: c.body for c in db.scalars(select(OrgPreboardingContent).where(OrgPreboardingContent.org_id == candidate.org_id)).all()}
     ack = db.scalar(select(PreboardingAcknowledgment).where(PreboardingAcknowledgment.candidate_id == candidate.id))
+    # QA REMEDIATION BLOCKER 7 (+ Step 0a): mirrors the Edge Function —
+    # rules_available was hardcoded False forever, a leftover from before
+    # Block D existed. Real query now: same org-wide-or-candidate's-
+    # department visibility rule /api/v1/rules already uses, mandatory
+    # rules only (a heads-up preview, not the full active list).
+    rule_clause = or_(Rule.department_id.is_(None), Rule.department_id == candidate.department_id) if candidate.department_id else Rule.department_id.is_(None)
+    rules = db.scalars(select(Rule).where(Rule.org_id == candidate.org_id, Rule.status == "active", Rule.is_mandatory.is_(True), rule_clause).order_by(Rule.category)).all()
     return {
         "candidate_name": candidate.full_name,
         "org_name": org.name if org else "the organisation",
@@ -219,9 +226,8 @@ def public_preview(token: str, db: Session = Depends(get_db)):
         "welcome": content.get("welcome", ""),
         "expectations_from_you": content.get("expectations_from_you", ""),
         "expectations_from_us": content.get("expectations_from_us", ""),
-        # Block D (Rules & Regulations) doesn't exist yet — say so rather
-        # than silently showing an empty rules section.
-        "rules_available": False,
+        "rules_available": len(rules) > 0,
+        "rules": [{"title": r.title, "category": r.category} for r in rules],
         "already_acknowledged": ack is not None,
         "acknowledged_at": ack.acknowledged_at.isoformat() if ack else None,
     }
