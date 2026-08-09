@@ -877,13 +877,34 @@ def create_submission(payload: dict, user: User = Depends(current_user), db: Ses
 
 @app.get("/api/v1/submissions/mine")
 def my_submissions(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    rows = db.scalars(select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.user_id == user.id).order_by(KnowledgeFeedback.created_at.desc())).all()
-    return [
+    rows = db.scalars(select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.user_id == user.id)).all()
+    items = [
         {"id": r.id, "type": r.type, "query": r.query, "reason": r.reason, "status": r.status, "resolution": r.resolution,
          "rejection_reason": r.rejection_reason, "target_implementation_date": r.target_implementation_date.isoformat() if r.target_implementation_date else None,
-         "created_at": r.created_at.isoformat(), "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None}
+         "created_at": r.created_at, "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None}
         for r in rows
     ]
+    # QA REMEDIATION MEDIUM 14: mirrors the Edge Function — per-rule
+    # "Suggest a change" submissions live in their own table
+    # (RuleChangeSuggestion) and never showed up in this unified view;
+    # the only place their status was visible was the separate
+    # /api/v1/rules/my-suggestions endpoint (unchanged, still exists).
+    rule_suggestions = db.scalars(
+        select(RuleChangeSuggestion).join(Rule, Rule.id == RuleChangeSuggestion.rule_id)
+        .where(Rule.org_id == user.org_id, RuleChangeSuggestion.suggested_by == user.id)
+    ).all()
+    for rs in rule_suggestions:
+        rule = db.get(Rule, rs.rule_id)
+        items.append({
+            "id": rs.id, "type": "rule_suggestion", "query": rs.suggestion_text, "reason": f"Rule: {rule.title if rule else 'Unknown rule'}",
+            "status": rs.status, "resolution": None, "rejection_reason": rs.rejection_reason,
+            "target_implementation_date": rs.target_implementation_date.isoformat() if rs.target_implementation_date else None,
+            "created_at": rs.created_at, "resolved_at": rs.reviewed_at.isoformat() if rs.reviewed_at else None,
+        })
+    items.sort(key=lambda i: i["created_at"], reverse=True)
+    for item in items:
+        item["created_at"] = item["created_at"].isoformat()
+    return items
 
 
 # BUILD PROMPT v5 BLOCK F: org-wide default max quiz attempts — a
