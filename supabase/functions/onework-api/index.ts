@@ -1113,7 +1113,7 @@ Deno.serve(async (req) => {
       if (!body.duration_minutes || Number(body.duration_minutes) <= 0) return fieldError("duration_minutes", "Duration must be greater than zero.");
       const { data: maxRow } = await supabase.from("training_modules").select("sequence").eq("org_id", user.org_id).order("sequence", { ascending: false }).limit(1).maybeSingle();
       const sequence = (maxRow?.sequence || 0) + 1;
-      const { data: module, error } = await supabase.from("training_modules").insert({ org_id: user.org_id, code: body.code.trim().toUpperCase(), title: body.title.trim(), objective: body.objective.trim(), duration_minutes: Number(body.duration_minutes), content_type: body.content_type || "mixed", passing_score: Number(body.passing_score) || 80, refresher_months: Number(body.refresher_months) || 12, sequence, status: "draft" }).select().single();
+      const { data: module, error } = await supabase.from("training_modules").insert({ org_id: user.org_id, code: body.code.trim().toUpperCase(), title: body.title.trim(), objective: body.objective.trim(), duration_minutes: Number(body.duration_minutes), content_type: body.content_type || "mixed", passing_score: Number(body.passing_score) || 80, refresher_months: Number(body.refresher_months) || 12, sequence, status: "draft", sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null }).select().single();
       if (error) return json({ detail: "A module with this code already exists." }, 409);
       const { data: employees } = await supabase.from("app_users").select("id").eq("org_id", user.org_id).eq("role", "employee").eq("is_active", true);
       if (employees?.length) await supabase.from("enrollments").insert(employees.map((e) => ({ org_id: user.org_id, user_id: e.id, module_id: module.id, status: "locked", assigned_by: user.id, assigned_at: new Date().toISOString() })));
@@ -1122,7 +1122,7 @@ Deno.serve(async (req) => {
     const moduleMatch = path.match(/^\/api\/v1\/admin\/training\/modules\/([^/]+)$/);
     if (moduleMatch && req.method === "PATCH") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const body = await req.json(); const editable = ["title","objective","duration_minutes","content_type","passing_score","refresher_months","is_mandatory","status"];
+      const body = await req.json(); const editable = ["title","objective","duration_minutes","content_type","passing_score","refresher_months","is_mandatory","status","sop_url","sop_label"];
       const patch: Record<string, unknown> = {}; for (const key of editable) if (body[key] !== undefined) patch[key] = body[key];
       if (patch.status && !["draft","published","archived"].includes(patch.status as string)) return fieldError("status", "Select a valid status.");
       const { data, error } = await supabase.from("training_modules").update(patch).eq("id", moduleMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
@@ -1223,7 +1223,7 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/content" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const kind = rawUrl.searchParams.get("kind");
-      let request = supabase.from("content_assets").select("id,kind,title,description,department,file_name,mime_type,size_bytes,version,status,external_url,message_subtype,created_at", { count: "exact" }).eq("org_id", user.org_id);
+      let request = supabase.from("content_assets").select("id,kind,title,description,department,file_name,mime_type,size_bytes,version,status,external_url,message_subtype,sop_url,sop_label,created_at", { count: "exact" }).eq("org_id", user.org_id);
       if (kind) request = request.eq("kind", kind);
       const { data, error, count } = await request.order("created_at", { ascending: false }).range(from, to); if (error) throw error;
       return json({ items: data || [], page, page_size: pageSize, total: count || 0 });
@@ -1240,7 +1240,7 @@ Deno.serve(async (req) => {
       const storagePath = `${user.org_id}/${body.kind}/${crypto.randomUUID()}-${safeName}`;
       const { data: signed, error: signError } = await supabase.storage.from(CONTENT_BUCKET).createSignedUploadUrl(storagePath);
       if (signError || !signed) return json({ detail: "Could not prepare the upload. Try again." }, 502);
-      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, storage_path: storagePath, file_name: safeName, mime_type: body.mime_type || "application/octet-stream", size_bytes: Number(body.size_bytes) || 0, uploaded_by: user.id, status: "pending" }).select().single();
+      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, storage_path: storagePath, file_name: safeName, mime_type: body.mime_type || "application/octet-stream", size_bytes: Number(body.size_bytes) || 0, sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, uploaded_by: user.id, status: "pending" }).select().single();
       if (error) throw error;
       return json({ asset_id: asset.id, upload_url: signed.signedUrl, storage_path: storagePath }, 201);
     }
@@ -1252,7 +1252,7 @@ Deno.serve(async (req) => {
       if (!["document","video","sop","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
       const messageSubtypeError = validateMessageSubtype(body.kind, body.message_subtype);
       if (messageSubtypeError) return messageSubtypeError;
-      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, external_url: body.external_url.trim(), uploaded_by: user.id, status: "ready" }).select().single();
+      const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, external_url: body.external_url.trim(), sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, uploaded_by: user.id, status: "ready" }).select().single();
       if (error) throw error;
       await audit(user, "content.link", "content_asset", asset.id, { kind: asset.kind, title: asset.title }); return json(asset, 201);
     }
@@ -1334,7 +1334,7 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/rules" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const [{ data: rules, error }, { data: departments }, { data: versions }] = await Promise.all([
-        supabase.from("rules").select("id,department_id,title,category,is_mandatory,status,published_version_id,created_at").eq("org_id", user.org_id).order("created_at", { ascending: false }),
+        supabase.from("rules").select("id,department_id,title,category,is_mandatory,status,published_version_id,sop_url,sop_label,created_at").eq("org_id", user.org_id).order("created_at", { ascending: false }),
         supabase.from("departments").select("id,name").eq("org_id", user.org_id),
         supabase.from("rule_versions").select("id,rule_id,version,body,created_at").order("version", { ascending: false }),
       ]);
@@ -1348,7 +1348,7 @@ Deno.serve(async (req) => {
       const body = await req.json();
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
       if (!body.body?.trim()) return fieldError("body", "Rule content is required.");
-      const { data: rule, error } = await supabase.from("rules").insert({ org_id: user.org_id, department_id: body.department_id || null, title: body.title.trim(), category: body.category?.trim() || "general", is_mandatory: body.is_mandatory !== false, created_by: user.id }).select().single();
+      const { data: rule, error } = await supabase.from("rules").insert({ org_id: user.org_id, department_id: body.department_id || null, title: body.title.trim(), category: body.category?.trim() || "general", is_mandatory: body.is_mandatory !== false, sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, created_by: user.id }).select().single();
       if (error) throw error;
       const { data: version, error: vError } = await supabase.from("rule_versions").insert({ rule_id: rule.id, version: 1, body: body.body.trim(), created_by: user.id }).select().single();
       if (vError) throw vError;
@@ -1364,6 +1364,8 @@ Deno.serve(async (req) => {
       if (body.department_id !== undefined) patch.department_id = body.department_id || null;
       if (body.is_mandatory !== undefined) patch.is_mandatory = Boolean(body.is_mandatory);
       if (body.status !== undefined) patch.status = body.status;
+      if (body.sop_url !== undefined) patch.sop_url = String(body.sop_url).trim() || null;
+      if (body.sop_label !== undefined) patch.sop_label = String(body.sop_label).trim() || null;
       const { data, error } = await supabase.from("rules").update(patch).eq("id", ruleMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
       if (error) throw error; if (!data) return json({ detail: "Rule not found." }, 404);
       await audit(user, "rule.update", "rule", data.id); return json(data);
@@ -1417,7 +1419,7 @@ Deno.serve(async (req) => {
     // -------------------------------------------------------------------
     if (path === "/api/v1/rules" && req.method === "GET") {
       const [{ data: rules, error }, { data: reads }] = await Promise.all([
-        supabase.from("rules").select("id,department_id,title,category,is_mandatory,published_version_id,rule_versions!rules_published_version_id_fkey(id,version,body,created_at)").eq("org_id", user.org_id).eq("status", "active").or(`department_id.is.null,department_id.eq.${user.department_id || "00000000-0000-0000-0000-000000000000"}`),
+        supabase.from("rules").select("id,department_id,title,category,is_mandatory,published_version_id,sop_url,sop_label,rule_versions!rules_published_version_id_fkey(id,version,body,created_at)").eq("org_id", user.org_id).eq("status", "active").or(`department_id.is.null,department_id.eq.${user.department_id || "00000000-0000-0000-0000-000000000000"}`),
         supabase.from("rule_reads").select("rule_version_id").eq("user_id", user.id),
       ]);
       if (error) throw error;
@@ -1425,6 +1427,7 @@ Deno.serve(async (req) => {
       return json((rules || []).map((r: any) => ({
         id: r.id, title: r.title, category: r.category, is_mandatory: r.is_mandatory,
         version_id: r.rule_versions?.id || null, version: r.rule_versions?.version || null, body: r.rule_versions?.body || null,
+        sop_url: r.sop_url || null, sop_label: r.sop_label || null,
         read: r.rule_versions?.id ? readVersionIds.has(r.rule_versions.id) : false,
       })));
     }

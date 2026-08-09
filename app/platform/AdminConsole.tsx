@@ -1013,7 +1013,7 @@ function MatrixPanel({ token }: { token: string }) {
 // Training module and quiz builder
 // ---------------------------------------------------------------------------
 
-type TrainingModuleRow = { id: string; code: string; title: string; objective: string; duration_minutes: number; passing_score: number; sequence: number; status: string };
+type TrainingModuleRow = { id: string; code: string; title: string; objective: string; duration_minutes: number; passing_score: number; sequence: number; status: string; sop_url?: string | null; sop_label?: string | null };
 type QuizQuestionRow = { id: string; prompt: string; options: string[]; correct_index: number; explanation: string };
 
 function QuizBuilderModal({ token, module, onClose }: { token: string; module: TrainingModuleRow; onClose: () => void }) {
@@ -1176,12 +1176,16 @@ function TrainingPanel({ token }: { token: string }) {
     { key: "objective", label: "Objective", type: "textarea", required: true },
     { key: "duration_minutes", label: "Duration (minutes)", type: "number", required: true },
     { key: "passing_score", label: "Passing Score (%)", type: "number" },
+    { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
+    { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
   ];
   const editFields: FieldDef[] = [
     { key: "title", label: "Title", type: "text", required: true },
     { key: "objective", label: "Objective", type: "textarea", required: true },
     { key: "duration_minutes", label: "Duration (minutes)", type: "number", required: true },
     { key: "passing_score", label: "Passing Score (%)", type: "number" },
+    { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
+    { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
     { key: "status", label: "Status", type: "select", required: true, options: [{ value: "draft", label: "Draft" }, { value: "published", label: "Published" }, { value: "archived", label: "Archived" }] },
   ];
 
@@ -1537,7 +1541,7 @@ function FeedbackPanel({ token }: { token: string }) {
 // Content library — documents, video tutorials, SOP files and mistake register
 // ---------------------------------------------------------------------------
 
-type ContentAsset = { id: string; kind: string; title: string; description: string | null; file_name: string; mime_type: string; size_bytes: number; status: string; message_subtype?: string | null; created_at: string };
+type ContentAsset = { id: string; kind: string; title: string; description: string | null; file_name: string; mime_type: string; size_bytes: number; status: string; message_subtype?: string | null; sop_url?: string | null; sop_label?: string | null; created_at: string };
 type MistakeRow = { id: string; code: string; title: string; description: string; correct_practice: string; category: string; severity: string; status: string; is_seed: boolean };
 
 const CONTENT_KIND_OPTIONS = [
@@ -1579,6 +1583,8 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("document");
   const [messageSubtype, setMessageSubtype] = useState("");
+  const [sopUrl, setSopUrl] = useState("");
+  const [sopLabel, setSopLabel] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState("");
@@ -1596,6 +1602,7 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
       const prepared = await submitJson("/api/v1/admin/content/upload-url", token, "POST", {
         title: title.trim(), description: description.trim() || undefined, kind,
         message_subtype: kind === "onboarding_message" ? messageSubtype : undefined,
+        sop_url: sopUrl.trim() || undefined, sop_label: sopLabel.trim() || undefined,
         file_name: file!.name, mime_type: file!.type || "application/octet-stream", size_bytes: file!.size,
       });
       setProgress(45);
@@ -1641,6 +1648,14 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
             {errors.message_subtype && <p className={styles.fieldError}>{errors.message_subtype}</p>}
           </div>
         )}
+        <div className={styles.field}>
+          <label>SOPGalaxy Link</label>
+          <input value={sopUrl} placeholder="https://app.sopgalaxy.com/…" onChange={(e) => setSopUrl(e.target.value)} />
+        </div>
+        <div className={styles.field}>
+          <label>SOP Link Text</label>
+          <input value={sopLabel} placeholder="Defaults to “View SOP for this”" onChange={(e) => setSopLabel(e.target.value)} />
+        </div>
         <div className={styles.field} data-invalid={errors.file ? "true" : "false"}>
           <label>File<span className={styles.required}>*</span></label>
           <div className={styles.uploadDrop}>
@@ -1673,6 +1688,8 @@ function ExternalLinkModal({ token, onCancel, onAdded }: { token: string; onCanc
     { key: "kind", label: "Content Type", type: "select", required: true, options: CONTENT_KIND_OPTIONS.filter((o) => o.value !== "mistake_register") },
     { key: "message_subtype", label: "Message From", type: "select", options: MESSAGE_SUBTYPE_OPTIONS, helpText: "Only used when Content Type is Onboarding Message." },
     { key: "external_url", label: "Link (YouTube or any URL)", type: "text", required: true, placeholder: "https://www.youtube.com/watch?v=..." },
+    { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
+    { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
   ];
   return (
     <FormModal
@@ -2226,7 +2243,7 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
 // department-scoped visibility, suggest-a-change review queue.
 // ---------------------------------------------------------------------------
 
-type AdminRule = { id: string; department_id: string | null; department_name: string | null; title: string; category: string; is_mandatory: boolean; status: string; published_version_id: string | null; published_version: { version: number; body: string } | null; created_at: string };
+type AdminRule = { id: string; department_id: string | null; department_name: string | null; title: string; category: string; is_mandatory: boolean; status: string; published_version_id: string | null; published_version: { version: number; body: string } | null; sop_url: string | null; sop_label: string | null; created_at: string };
 type RuleSuggestion = { id: string; rule_id: string; rule_title: string; suggested_by: string; suggested_by_name: string; suggestion_text: string; status: string; rejection_reason: string | null; target_implementation_date: string | null; reviewed_at: string | null; created_at: string };
 
 const SUGGESTION_STATUSES = ["submitted", "under_review", "accepted", "rejected", "implementation_pending", "implemented"];
@@ -2266,6 +2283,11 @@ function RulesListTab({ token }: { token: string }) {
     { key: "category", label: "Category", type: "text", placeholder: "e.g. conduct, security, leave" },
     { key: "department_id", label: "Department", type: "select", options: departments.map((d) => ({ value: d.id, label: d.name })), helpText: "Leave blank to apply organisation-wide." },
     { key: "is_mandatory", label: "Mandatory", type: "select", options: [{ value: "true", label: "Yes — blocks quiz attempts until read" }, { value: "false", label: "No" }] },
+    // BUILD PROMPT v5 BLOCK E: plain URL into SOPGalaxy — same "leave
+    // blank if there's nothing to link" convention as the Responsibility
+    // Matrix's SOPGalaxy Link field.
+    { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
+    { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
     ...(modal?.mode === "create" ? [{ key: "body", label: "Rule Content", type: "textarea" as const, required: true }] : []),
   ];
 
@@ -2297,7 +2319,7 @@ function RulesListTab({ token }: { token: string }) {
         <FormModal
           title={modal.mode === "create" ? "Add Rule" : "Edit Rule"}
           fields={ruleFields}
-          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory) } : { is_mandatory: "true" }}
+          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory), sop_url: modal.row.sop_url || "", sop_label: modal.row.sop_label || "" } : { is_mandatory: "true" }}
           submitLabel={modal.mode === "create" ? "Add Rule" : "Save Changes"}
           onCancel={() => setModal(null)}
           onSubmit={async (values) => {

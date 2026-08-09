@@ -95,6 +95,10 @@ class TrainingModule(Base, TimestampMixin):
     sequence: Mapped[int] = mapped_column(Integer)
     is_mandatory: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(30), default="published")
+    # BUILD PROMPT v5 BLOCK E: plain URL into SOPGalaxy, same convention as
+    # Activity.sop_link — this app does not run its own SOP repository.
+    sop_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sop_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class QuizQuestion(Base, TimestampMixin):
@@ -305,6 +309,10 @@ class Rule(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default="active")
     published_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # BUILD PROMPT v5 BLOCK E: plain URL into SOPGalaxy, same convention as
+    # Activity.sop_link / TrainingModule.sop_url.
+    sop_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sop_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class RuleVersion(Base):
