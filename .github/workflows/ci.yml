@@ -39,3 +39,4 @@ jobs:
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_rule_edit_versioning.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_resolved_query_searchable.py -q
       - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_query_department_routing.py -q
+      - run: cd backend && ../backend/.venv/bin/python -m pytest tests/test_prejoining_preview_rules.py -q
