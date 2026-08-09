@@ -63,6 +63,16 @@ def _attempt_status(db: Session, user: User, module_id: str, module_max_attempts
     }
 
 
+# QA REMEDIATION BLOCKER 1 + 9: mirrors the Edge Function's
+# assertModuleUnlocked — "locked" enrollment status was previously only
+# enforced by the frontend disabling the button; a direct GET/POST to a
+# module the employee hasn't reached yet skipped the check entirely.
+def _assert_module_unlocked(db: Session, user: User, module_id: str) -> None:
+    enrollment = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.module_id == module_id))
+    if enrollment and enrollment.status == "locked":
+        raise HTTPException(status_code=403, detail="This module isn't unlocked yet — complete the modules before it first.")
+
+
 # Mirrors Supabase's public.enqueue_onework_reminders(), which runs nightly
 # there via pg_cron. There's no scheduler in this local reference backend,
 # so it's run lazily and idempotently (same "not already enqueued today"
@@ -659,6 +669,7 @@ def delete_question(question_id: str, user: User = Depends(admin_user), db: Sess
 def get_quiz(module_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     module = db.scalar(select(TrainingModule).where(TrainingModule.id == module_id, TrainingModule.org_id == user.org_id))
     if not module: raise HTTPException(404, "Module not found")
+    _assert_module_unlocked(db, user, module.id)
     questions = db.scalars(select(QuizQuestion).where(QuizQuestion.org_id == user.org_id, QuizQuestion.module_id == module_id)).all()
     # BUILD PROMPT v5 BLOCK F: upfront requirements/remaining-attempts
     # display — seen before starting, not after failing enough to be blocked.
@@ -670,6 +681,7 @@ def get_quiz(module_id: str, user: User = Depends(current_user), db: Session = D
 def submit_quiz(module_id: str, payload: QuizSubmission, user: User = Depends(current_user), db: Session = Depends(get_db)):
     module = db.scalar(select(TrainingModule).where(TrainingModule.id == module_id, TrainingModule.org_id == user.org_id))
     if not module: raise HTTPException(404, "Module not found")
+    _assert_module_unlocked(db, user, module.id)
     questions = db.scalars(select(QuizQuestion).where(QuizQuestion.org_id == user.org_id, QuizQuestion.module_id == module_id).order_by(QuizQuestion.created_at)).all()
     if not questions or len(payload.answers) != len(questions): raise HTTPException(400, "Submit one answer for every question")
     # BUILD PROMPT v5 BLOCK D: gating chain — you cannot even attempt a

@@ -99,6 +99,25 @@ async function attemptStatus(user: { id: string; org_id: string }, moduleId: str
   };
 }
 
+// QA REMEDIATION BLOCKER 1 + 9: modules unlock strictly in sequence
+// (enrollments.status starts "locked" for every module past sequence 1,
+// and only flips to "assigned" once the module before it is passed —
+// see the `if (passed)` unlock below). Until this fix, that "locked"
+// status was enforced ONLY by the frontend disabling the button — a
+// direct call to GET .../quiz or POST .../attempt for a module the
+// employee hadn't reached yet skipped the check entirely and graded it
+// like any other. This is the real server-side gate: called from both
+// routes so a locked module can neither be viewed nor attempted by
+// going straight to the API, matching the same defence-in-depth pattern
+// already used for the mandatory-rules-unread and attempt-cap gates.
+async function assertModuleUnlocked(user: { id: string; org_id: string }, moduleId: string) {
+  const { data: enrollment } = await supabase.from("enrollments").select("status").eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", moduleId).maybeSingle();
+  if (enrollment?.status === "locked") {
+    return json({ detail: "This module isn't unlocked yet — complete the modules before it first." }, 403);
+  }
+  return null;
+}
+
 function forbidUnlessAdmin(isAdmin: boolean) {
   return isAdmin ? null : json({ detail: "Administrator permission required." }, 403);
 }
@@ -570,6 +589,7 @@ Deno.serve(async (req) => {
     if (quizMatch && req.method === "GET") {
       const { data: module } = await supabase.from("training_modules").select("id,title,passing_score,max_attempts").eq("id", quizMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!module) return json({ detail: "Module not found." }, 404);
+      const lockDenied = await assertModuleUnlocked(user, module.id); if (lockDenied) return lockDenied;
       const { data: questions } = await supabase.from("quiz_questions").select("id,prompt,options").eq("org_id", user.org_id).eq("module_id", module.id).order("created_at");
       // BUILD PROMPT v5 BLOCK F: upfront requirements/remaining-attempts
       // display — the employee sees the threshold and cap before starting,
@@ -583,6 +603,7 @@ Deno.serve(async (req) => {
       const { answers } = await req.json();
       const [{ data: module }, { data: questions }] = await Promise.all([supabase.from("training_modules").select("*").eq("id", attemptMatch[1]).eq("org_id", user.org_id).maybeSingle(), supabase.from("quiz_questions").select("correct_index,explanation").eq("org_id", user.org_id).eq("module_id", attemptMatch[1]).order("created_at")]);
       if (!module) return json({ detail: "Module not found." }, 404);
+      const lockDenied = await assertModuleUnlocked(user, module.id); if (lockDenied) return lockDenied;
       if (!questions?.length || answers?.length !== questions.length) return json({ detail: "Submit one answer for every question." }, 400);
       // BUILD PROMPT v5 BLOCK D: gating chain — you cannot even attempt a
       // quiz while a mandatory rule that applies to you is unread.
