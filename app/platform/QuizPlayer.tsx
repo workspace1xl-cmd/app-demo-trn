@@ -4,7 +4,11 @@ import { useEffect, useState } from "react";
 import styles from "./platform.module.css";
 import { request } from "./PlatformApp";
 
-type QuizQuestion = { id: string; prompt: string; options: string[] };
+// QA REMEDIATION BLOCKER 2: weight_percent — how much this question
+// counts toward the overall score. Always present (defaults to 100 on
+// the backend), only shown to the employee when it differs from the
+// equal-weight default so a legacy all-100 quiz looks unchanged.
+type QuizQuestion = { id: string; prompt: string; options: string[]; weight_percent: number };
 // BUILD PROMPT v5 BLOCK F: max_attempts/attempts_used/attempts_remaining/
 // onboarding_blocked are shown upfront — before the employee starts —
 // not just discovered after they've already failed enough times to hit
@@ -85,13 +89,18 @@ export default function QuizPlayer({
                   scale, what it measures and the threshold, all stated
                   up front, not just a bare number. */}
               <p className={styles.quizIntro}>
-                Answer every question, then submit. Score is the percentage of questions answered correctly — you
+                Answer every question, then submit. Some questions count more toward your score than others — you
                 need {quiz.passing_score}% to pass. Attempts remaining: {quiz.attempts_remaining} of {quiz.max_attempts}.
               </p>
               {quiz.questions.map((question, index) => (
                 <div key={question.id} className={styles.quizQuestion}>
                   <b>
                     {index + 1}. {question.prompt}
+                    {question.weight_percent !== 100 && (
+                      <small style={{ fontWeight: 400, color: "#8b8f9e", marginLeft: 8 }}>
+                        (counts {question.weight_percent}% toward your score)
+                      </small>
+                    )}
                   </b>
                   <div className={styles.quizOptions}>
                     {question.options.map((option, optionIndex) => (

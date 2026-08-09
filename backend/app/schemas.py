@@ -126,6 +126,9 @@ class QuestionCreate(BaseModel):
     options: list[str] = Field(min_length=2)
     correct_index: int = Field(ge=0)
     explanation: str = Field(min_length=1)
+    # QA REMEDIATION BLOCKER 2: how much this question counts toward the
+    # module's overall score.
+    weight_percent: int = Field(default=100, gt=0, le=100)
 
 
 class QuestionUpdate(BaseModel):
@@ -133,6 +136,7 @@ class QuestionUpdate(BaseModel):
     options: list[str] | None = None
     correct_index: int | None = None
     explanation: str | None = None
+    weight_percent: int | None = Field(default=None, gt=0, le=100)
 
 
 class EnrollmentUpdate(BaseModel):
