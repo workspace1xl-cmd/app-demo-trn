@@ -43,6 +43,26 @@ def _unread_mandatory_rule_titles(db: Session, user: User) -> list[str]:
     return [r.title for r in with_version if r.published_version_id not in read_version_ids]
 
 
+# BUILD PROMPT v5 BLOCK F: mirrors the Edge Function's attemptStatus —
+# attempts-used is computed by counting QuizAttempt rows (the real attempt
+# log), not a separate counter that could drift; a reset genuinely clears
+# the block via attempts_reset_at rather than being permanent once tripped.
+def _attempt_status(db: Session, user: User, module_id: str, module_max_attempts: int | None) -> dict:
+    org = db.get(Organization, user.org_id)
+    enrollment = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.module_id == module_id))
+    max_attempts = module_max_attempts if module_max_attempts is not None else (org.default_max_quiz_attempts if org else 3)
+    stmt = select(func.count()).select_from(QuizAttempt).where(QuizAttempt.org_id == user.org_id, QuizAttempt.user_id == user.id, QuizAttempt.module_id == module_id)
+    if enrollment and enrollment.attempts_reset_at:
+        stmt = stmt.where(QuizAttempt.created_at > enrollment.attempts_reset_at)
+    attempts_used = db.scalar(stmt) or 0
+    return {
+        "max_attempts": max_attempts,
+        "attempts_used": attempts_used,
+        "attempts_remaining": max(0, max_attempts - attempts_used),
+        "onboarding_blocked": bool(enrollment and enrollment.onboarding_blocked),
+    }
+
+
 # Mirrors Supabase's public.enqueue_onework_reminders(), which runs nightly
 # there via pg_cron. There's no scheduler in this local reference backend,
 # so it's run lazily and idempotently (same "not already enqueued today"
@@ -640,7 +660,10 @@ def get_quiz(module_id: str, user: User = Depends(current_user), db: Session = D
     module = db.scalar(select(TrainingModule).where(TrainingModule.id == module_id, TrainingModule.org_id == user.org_id))
     if not module: raise HTTPException(404, "Module not found")
     questions = db.scalars(select(QuizQuestion).where(QuizQuestion.org_id == user.org_id, QuizQuestion.module_id == module_id)).all()
-    return {"module_id": module.id, "title": module.title, "passing_score": module.passing_score, "questions": [{"id": q.id, "prompt": q.prompt, "options": q.options} for q in questions]}
+    # BUILD PROMPT v5 BLOCK F: upfront requirements/remaining-attempts
+    # display — seen before starting, not after failing enough to be blocked.
+    attempts = _attempt_status(db, user, module.id, module.max_attempts)
+    return {"module_id": module.id, "title": module.title, "passing_score": module.passing_score, "questions": [{"id": q.id, "prompt": q.prompt, "options": q.options} for q in questions], **attempts}
 
 
 @app.post("/api/v1/training/modules/{module_id}/attempt")
@@ -654,11 +677,21 @@ def submit_quiz(module_id: str, payload: QuizSubmission, user: User = Depends(cu
     unread = _unread_mandatory_rule_titles(db, user)
     if unread:
         raise HTTPException(403, {"detail": f"Read all mandatory rules before attempting this quiz. Still unread: {', '.join(unread)}.", "unread_rules": unread})
+    # BUILD PROMPT v5 BLOCK F: the actual attempt cap — blocked or out of
+    # attempts means no scoring happens at all, not just a UI warning.
+    attempts_before = _attempt_status(db, user, module.id, module.max_attempts)
+    if attempts_before["onboarding_blocked"]:
+        raise HTTPException(403, {"detail": "You've used all your attempts for this quiz without passing. Ask your admin or manager to reset your attempts.", **attempts_before})
+    if attempts_before["attempts_remaining"] <= 0:
+        raise HTTPException(403, {"detail": "No attempts remaining for this quiz.", **attempts_before})
     correct = sum(answer == question.correct_index for answer, question in zip(payload.answers, questions)); score = round(correct / len(questions) * 100); passed = score >= module.passing_score
     db.add(QuizAttempt(org_id=user.org_id, user_id=user.id, module_id=module.id, score=score, passed=passed, answers=payload.answers))
     enrollment = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.module_id == module.id))
+    # A failed final attempt trips the block; a pass never does.
+    will_exhaust_attempts = (not passed) and attempts_before["attempts_remaining"] <= 1
     if enrollment:
         enrollment.best_score = max(enrollment.best_score or 0, score)
+        enrollment.onboarding_blocked = will_exhaust_attempts
         if passed:
             enrollment.status = "completed"; enrollment.progress_percent = 100; enrollment.completed_at = datetime.utcnow()
             existing = db.scalar(select(Certificate).where(Certificate.org_id == user.org_id, Certificate.user_id == user.id, Certificate.module_id == module.id))
@@ -668,7 +701,8 @@ def submit_quiz(module_id: str, payload: QuizSubmission, user: User = Depends(cu
                 next_enrollment = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.module_id == next_module.id))
                 if next_enrollment and next_enrollment.status == "locked": next_enrollment.status = "assigned"
     audit(db, user, "quiz.submit", "training_module", module.id, {"score": score, "passed": passed}); db.commit()
-    return {"score": score, "passed": passed, "passing_score": module.passing_score, "correct": correct, "total": len(questions), "explanations": [q.explanation for q in questions]}
+    attempts_after = _attempt_status(db, user, module.id, module.max_attempts)
+    return {"score": score, "passed": passed, "passing_score": module.passing_score, "correct": correct, "total": len(questions), "explanations": [q.explanation for q in questions], **attempts_after}
 
 
 @app.get("/api/v1/certificates")
@@ -732,6 +766,27 @@ async def knowledge_search(payload: SearchRequest, user: User = Depends(current_
 @app.post("/api/v1/feedback", status_code=201)
 def create_feedback(payload: FeedbackRequest, user: User = Depends(current_user), db: Session = Depends(get_db)):
     item = KnowledgeFeedback(org_id=user.org_id, user_id=user.id, query=payload.query, reason=payload.reason, routed_to="Knowledge governance queue"); db.add(item); db.flush(); audit(db, user, "feedback.create", "knowledge_feedback", item.id); db.commit(); return {"id": item.id, "status": item.status, "routed_to": item.routed_to}
+
+
+# BUILD PROMPT v5 BLOCK F: org-wide default max quiz attempts — a
+# per-module override (TrainingModule.max_attempts) always wins when set;
+# this is only the fallback for modules that don't set one.
+@app.get("/api/v1/admin/organization")
+def get_organization(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    org = db.get(Organization, user.org_id)
+    return {"id": org.id, "name": org.name, "default_max_quiz_attempts": org.default_max_quiz_attempts}
+
+
+@app.patch("/api/v1/admin/organization")
+def update_organization(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    org = db.get(Organization, user.org_id)
+    value = payload.get("default_max_quiz_attempts")
+    if value is not None and int(value) <= 0:
+        raise HTTPException(400, {"detail": "Must be greater than zero.", "field": "default_max_quiz_attempts"})
+    if value is not None:
+        org.default_max_quiz_attempts = int(value)
+    audit(db, user, "organization.update", "organization", org.id, {"default_max_quiz_attempts": org.default_max_quiz_attempts}); db.commit()
+    return {"id": org.id, "name": org.name, "default_max_quiz_attempts": org.default_max_quiz_attempts}
 
 
 @app.get("/api/v1/admin/analytics")
@@ -1328,7 +1383,7 @@ def list_enrollments(page: int = Query(default=1, ge=1), page_size: int = Query(
     rows, meta = paginate_query(stmt.order_by(Enrollment.due_date.is_(None), Enrollment.due_date), db, page, page_size)
     employees = {u.id: {"id": u.id, "full_name": u.full_name, "email": u.email} for u in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
     modules = {m.id: {"id": m.id, "title": m.title, "code": m.code} for m in db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id)).all()}
-    return {"items": [{"id": r.id, "status": r.status, "progress_percent": r.progress_percent, "best_score": r.best_score, "due_date": r.due_date, "completed_at": r.completed_at, "employee": employees.get(r.user_id), "module": modules.get(r.module_id)} for r in rows], **meta}
+    return {"items": [{"id": r.id, "status": r.status, "progress_percent": r.progress_percent, "best_score": r.best_score, "due_date": r.due_date, "completed_at": r.completed_at, "onboarding_blocked": r.onboarding_blocked, "employee": employees.get(r.user_id), "module": modules.get(r.module_id)} for r in rows], **meta}
 
 
 @app.patch("/api/v1/admin/enrollments/{enrollment_id}")
@@ -1339,6 +1394,19 @@ def update_enrollment(enrollment_id: str, payload: EnrollmentUpdate, user: User 
     if payload.status is not None: item.status = payload.status
     if payload.due_date is not None: item.due_date = date.fromisoformat(payload.due_date) if payload.due_date else None
     db.flush(); audit(db, user, "enrollment.update", "enrollment", item.id); db.commit(); return row_dict(item)
+
+
+# BUILD PROMPT v5 BLOCK F: a genuine reset — attempts_reset_at means
+# attempts before this moment stop counting, and onboarding_blocked
+# clears, without deleting the real attempt log.
+@app.post("/api/v1/admin/enrollments/{enrollment_id}/reset-attempts")
+def reset_enrollment_attempts(enrollment_id: str, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    item = db.scalar(select(Enrollment).where(Enrollment.id == enrollment_id, Enrollment.org_id == user.org_id))
+    if not item: raise HTTPException(404, "Assignment not found.")
+    item.onboarding_blocked = False
+    item.attempts_reset_at = datetime.utcnow()
+    audit(db, user, "enrollment.reset_attempts", "enrollment", item.id); db.commit()
+    return row_dict(item)
 
 
 @app.post("/api/v1/admin/enrollments/assign", status_code=201)

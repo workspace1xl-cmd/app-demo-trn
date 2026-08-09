@@ -77,6 +77,28 @@ async function unreadMandatoryRuleTitles(user: { id: string; org_id: string; dep
   return withVersion.filter((r) => !readVersionIds.has(r.published_version_id)).map((r) => r.title);
 }
 
+// BUILD PROMPT v5 BLOCK F: attempts-used is computed by counting
+// quiz_attempts rows (the real attempt log), not a separate counter column
+// that could drift — attempts before enrollment.attempts_reset_at (if any)
+// don't count, which is what makes a reset genuinely clear the block
+// instead of the block being permanent once tripped.
+async function attemptStatus(user: { id: string; org_id: string }, moduleId: string, moduleMaxAttempts: number | null) {
+  const [{ data: org }, { data: enrollment }] = await Promise.all([
+    supabase.from("organizations").select("default_max_quiz_attempts").eq("id", user.org_id).maybeSingle(),
+    supabase.from("enrollments").select("onboarding_blocked,attempts_reset_at").eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", moduleId).maybeSingle(),
+  ]);
+  const maxAttempts = moduleMaxAttempts ?? org?.default_max_quiz_attempts ?? 3;
+  let attemptsQuery = supabase.from("quiz_attempts").select("id", { count: "exact", head: true }).eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", moduleId);
+  if (enrollment?.attempts_reset_at) attemptsQuery = attemptsQuery.gt("created_at", enrollment.attempts_reset_at);
+  const { count: attemptsUsed } = await attemptsQuery;
+  return {
+    max_attempts: maxAttempts,
+    attempts_used: attemptsUsed || 0,
+    attempts_remaining: Math.max(0, maxAttempts - (attemptsUsed || 0)),
+    onboarding_blocked: enrollment?.onboarding_blocked || false,
+  };
+}
+
 function forbidUnlessAdmin(isAdmin: boolean) {
   return isAdmin ? null : json({ detail: "Administrator permission required." }, 403);
 }
@@ -546,10 +568,14 @@ Deno.serve(async (req) => {
 
     const quizMatch = path.match(/^\/api\/v1\/training\/modules\/([^/]+)\/quiz$/);
     if (quizMatch && req.method === "GET") {
-      const { data: module } = await supabase.from("training_modules").select("id,title,passing_score").eq("id", quizMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      const { data: module } = await supabase.from("training_modules").select("id,title,passing_score,max_attempts").eq("id", quizMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!module) return json({ detail: "Module not found." }, 404);
       const { data: questions } = await supabase.from("quiz_questions").select("id,prompt,options").eq("org_id", user.org_id).eq("module_id", module.id).order("created_at");
-      return json({ module_id: module.id, title: module.title, passing_score: module.passing_score, questions: questions || [] });
+      // BUILD PROMPT v5 BLOCK F: upfront requirements/remaining-attempts
+      // display — the employee sees the threshold and cap before starting,
+      // not after failing enough times to hit a surprise block.
+      const attempts = await attemptStatus(user, module.id, module.max_attempts);
+      return json({ module_id: module.id, title: module.title, passing_score: module.passing_score, questions: questions || [], ...attempts });
     }
 
     const attemptMatch = path.match(/^\/api\/v1\/training\/modules\/([^/]+)\/attempt$/);
@@ -562,10 +588,19 @@ Deno.serve(async (req) => {
       // quiz while a mandatory rule that applies to you is unread.
       const unread = await unreadMandatoryRuleTitles(user);
       if (unread.length) return json({ detail: `Read all mandatory rules before attempting this quiz. Still unread: ${unread.join(", ")}.`, unread_rules: unread }, 403);
+      // BUILD PROMPT v5 BLOCK F: the actual attempt cap — blocked (or
+      // already out of attempts) means no scoring happens at all, not
+      // just a UI warning after the fact.
+      const attemptsBefore = await attemptStatus(user, module.id, module.max_attempts);
+      if (attemptsBefore.onboarding_blocked) return json({ detail: "You've used all your attempts for this quiz without passing. Ask your admin or manager to reset your attempts.", ...attemptsBefore }, 403);
+      if (attemptsBefore.attempts_remaining <= 0) return json({ detail: "No attempts remaining for this quiz.", ...attemptsBefore }, 403);
       const correct = questions.filter((question, index) => question.correct_index === answers[index]).length, score = Math.round(correct / questions.length * 100), passed = score >= module.passing_score;
       await supabase.from("quiz_attempts").insert({ org_id: user.org_id, user_id: user.id, module_id: module.id, score, passed, answers });
       const { data: enrollment } = await supabase.from("enrollments").select("id,best_score").eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", module.id).maybeSingle();
-      if (enrollment) await supabase.from("enrollments").update({ best_score: Math.max(enrollment.best_score || 0, score), ...(passed ? { status: "completed", progress_percent: 100, completed_at: new Date().toISOString() } : {}) }).eq("id", enrollment.id);
+      // A failed final attempt trips the block; a pass never does, even on
+      // the last allowed attempt.
+      const willExhaustAttempts = !passed && attemptsBefore.attempts_remaining <= 1;
+      if (enrollment) await supabase.from("enrollments").update({ best_score: Math.max(enrollment.best_score || 0, score), onboarding_blocked: willExhaustAttempts, ...(passed ? { status: "completed", progress_percent: 100, completed_at: new Date().toISOString() } : {}) }).eq("id", enrollment.id);
       if (passed) {
         // A refresher_months=12 certificate must expire in exactly one
         // calendar year, not 12*30=360 days (5 days short of a year).
@@ -575,7 +610,9 @@ Deno.serve(async (req) => {
         const { data: next } = await supabase.from("training_modules").select("id").eq("org_id", user.org_id).eq("sequence", module.sequence + 1).maybeSingle();
         if (next) await supabase.from("enrollments").update({ status: "assigned" }).eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", next.id).eq("status", "locked");
       }
-      await audit(user, "quiz.submit", "training_module", module.id, { score, passed }); return json({ score, passed, passing_score: module.passing_score, correct, total: questions.length, explanations: questions.map((q) => q.explanation) });
+      await audit(user, "quiz.submit", "training_module", module.id, { score, passed });
+      const attemptsAfter = await attemptStatus(user, module.id, module.max_attempts);
+      return json({ score, passed, passing_score: module.passing_score, correct, total: questions.length, explanations: questions.map((q) => q.explanation), ...attemptsAfter });
     }
 
     if (path === "/api/v1/certificates") {
@@ -624,6 +661,25 @@ Deno.serve(async (req) => {
 
     if (path === "/api/v1/feedback" && req.method === "POST") {
       const body = await req.json(); const { data, error } = await supabase.from("knowledge_feedback").insert({ org_id: user.org_id, user_id: user.id, query: body.query, reason: body.reason, routed_to: "Knowledge governance queue" }).select().single(); if (error) throw error; await audit(user, "feedback.create", "knowledge_feedback", data.id); return json({ id: data.id, status: data.status, routed_to: data.routed_to }, 201);
+    }
+
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK F: org-wide default max quiz attempts — a
+    // per-module override (training_modules.max_attempts) always wins
+    // when set; this is only the fallback for modules that don't set one.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/admin/organization" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data } = await supabase.from("organizations").select("id,name,default_max_quiz_attempts").eq("id", user.org_id).maybeSingle();
+      return json(data);
+    }
+    if (path === "/api/v1/admin/organization" && req.method === "PATCH") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      if (body.default_max_quiz_attempts !== undefined && Number(body.default_max_quiz_attempts) <= 0) return fieldError("default_max_quiz_attempts", "Must be greater than zero.");
+      const { data, error } = await supabase.from("organizations").update({ default_max_quiz_attempts: Number(body.default_max_quiz_attempts) }).eq("id", user.org_id).select().maybeSingle();
+      if (error) throw error;
+      await audit(user, "organization.update", "organization", user.org_id, { default_max_quiz_attempts: data?.default_max_quiz_attempts }); return json(data);
     }
 
     // -------------------------------------------------------------------
@@ -1113,7 +1169,8 @@ Deno.serve(async (req) => {
       if (!body.duration_minutes || Number(body.duration_minutes) <= 0) return fieldError("duration_minutes", "Duration must be greater than zero.");
       const { data: maxRow } = await supabase.from("training_modules").select("sequence").eq("org_id", user.org_id).order("sequence", { ascending: false }).limit(1).maybeSingle();
       const sequence = (maxRow?.sequence || 0) + 1;
-      const { data: module, error } = await supabase.from("training_modules").insert({ org_id: user.org_id, code: body.code.trim().toUpperCase(), title: body.title.trim(), objective: body.objective.trim(), duration_minutes: Number(body.duration_minutes), content_type: body.content_type || "mixed", passing_score: Number(body.passing_score) || 80, refresher_months: Number(body.refresher_months) || 12, sequence, status: "draft", sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null }).select().single();
+      if (body.max_attempts !== undefined && body.max_attempts !== null && body.max_attempts !== "" && Number(body.max_attempts) <= 0) return fieldError("max_attempts", "Max Attempts must be greater than zero.");
+      const { data: module, error } = await supabase.from("training_modules").insert({ org_id: user.org_id, code: body.code.trim().toUpperCase(), title: body.title.trim(), objective: body.objective.trim(), duration_minutes: Number(body.duration_minutes), content_type: body.content_type || "mixed", passing_score: Number(body.passing_score) || 80, refresher_months: Number(body.refresher_months) || 12, sequence, status: "draft", sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, max_attempts: body.max_attempts ? Number(body.max_attempts) : null }).select().single();
       if (error) return json({ detail: "A module with this code already exists." }, 409);
       const { data: employees } = await supabase.from("app_users").select("id").eq("org_id", user.org_id).eq("role", "employee").eq("is_active", true);
       if (employees?.length) await supabase.from("enrollments").insert(employees.map((e) => ({ org_id: user.org_id, user_id: e.id, module_id: module.id, status: "locked", assigned_by: user.id, assigned_at: new Date().toISOString() })));
@@ -1122,7 +1179,7 @@ Deno.serve(async (req) => {
     const moduleMatch = path.match(/^\/api\/v1\/admin\/training\/modules\/([^/]+)$/);
     if (moduleMatch && req.method === "PATCH") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
-      const body = await req.json(); const editable = ["title","objective","duration_minutes","content_type","passing_score","refresher_months","is_mandatory","status","sop_url","sop_label"];
+      const body = await req.json(); const editable = ["title","objective","duration_minutes","content_type","passing_score","refresher_months","is_mandatory","status","sop_url","sop_label","max_attempts"];
       const patch: Record<string, unknown> = {}; for (const key of editable) if (body[key] !== undefined) patch[key] = body[key];
       if (patch.status && !["draft","published","archived"].includes(patch.status as string)) return fieldError("status", "Select a valid status.");
       const { data, error } = await supabase.from("training_modules").update(patch).eq("id", moduleMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
@@ -1166,10 +1223,10 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/enrollments" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { page, pageSize, from, to } = paginate(rawUrl); const moduleId = rawUrl.searchParams.get("module_id");
-      let request = supabase.from("enrollments").select("id,status,progress_percent,best_score,due_date,completed_at,app_users!enrollments_user_id_fkey(id,full_name,email),training_modules(id,title,code)", { count: "exact" }).eq("org_id", user.org_id);
+      let request = supabase.from("enrollments").select("id,status,progress_percent,best_score,due_date,completed_at,onboarding_blocked,app_users!enrollments_user_id_fkey(id,full_name,email),training_modules(id,title,code)", { count: "exact" }).eq("org_id", user.org_id);
       if (moduleId) request = request.eq("module_id", moduleId);
       const { data, error, count } = await request.order("due_date", { ascending: true, nullsFirst: false }).range(from, to); if (error) throw error;
-      return json({ items: (data || []).map((item: any) => ({ id: item.id, status: item.status, progress_percent: item.progress_percent, best_score: item.best_score, due_date: item.due_date, completed_at: item.completed_at, employee: item.app_users, module: item.training_modules })), page, page_size: pageSize, total: count || 0 });
+      return json({ items: (data || []).map((item: any) => ({ id: item.id, status: item.status, progress_percent: item.progress_percent, best_score: item.best_score, due_date: item.due_date, completed_at: item.completed_at, onboarding_blocked: item.onboarding_blocked, employee: item.app_users, module: item.training_modules })), page, page_size: pageSize, total: count || 0 });
     }
     const enrollmentMatch = path.match(/^\/api\/v1\/admin\/enrollments\/([^/]+)$/);
     if (enrollmentMatch && req.method === "PATCH") {
@@ -1180,6 +1237,16 @@ Deno.serve(async (req) => {
       const { data, error } = await supabase.from("enrollments").update(patch).eq("id", enrollmentMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
       if (error) throw error; if (!data) return json({ detail: "Assignment not found." }, 404);
       await audit(user, "enrollment.update", "enrollment", data.id, patch); return json(data);
+    }
+    // BUILD PROMPT v5 BLOCK F: a genuine reset — attempts_reset_at means
+    // attempts before this moment stop counting towards the cap, and
+    // onboarding_blocked clears, without deleting the real attempt log.
+    const resetAttemptsMatch = path.match(/^\/api\/v1\/admin\/enrollments\/([^/]+)\/reset-attempts$/);
+    if (resetAttemptsMatch && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data, error } = await supabase.from("enrollments").update({ onboarding_blocked: false, attempts_reset_at: new Date().toISOString() }).eq("id", resetAttemptsMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
+      if (error) throw error; if (!data) return json({ detail: "Assignment not found." }, 404);
+      await audit(user, "enrollment.reset_attempts", "enrollment", data.id); return json(data);
     }
     if (path === "/api/v1/admin/enrollments/assign" && req.method === "POST") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;

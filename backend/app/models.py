@@ -23,6 +23,9 @@ class Organization(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(30), default="active")
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    # BUILD PROMPT v5 BLOCK F: org-wide fallback attempt cap — a
+    # TrainingModule.max_attempts override always wins when set.
+    default_max_quiz_attempts: Mapped[int] = mapped_column(Integer, default=3)
 
 
 class Department(Base, TimestampMixin):
@@ -99,6 +102,9 @@ class TrainingModule(Base, TimestampMixin):
     # Activity.sop_link — this app does not run its own SOP repository.
     sop_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     sop_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # BUILD PROMPT v5 BLOCK F: per-module override; null falls back to
+    # Organization.default_max_quiz_attempts.
+    max_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class QuizQuestion(Base, TimestampMixin):
@@ -126,6 +132,11 @@ class Enrollment(Base, TimestampMixin):
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     assigned_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # BUILD PROMPT v5 BLOCK F: attempts-used is computed by counting
+    # QuizAttempt rows created after attempts_reset_at (or all, if unset) —
+    # a genuine reset, not a permanent block once tripped.
+    onboarding_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    attempts_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class QuizAttempt(Base, TimestampMixin):

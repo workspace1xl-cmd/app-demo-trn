@@ -172,14 +172,18 @@ function Modal({ title, onClose, children, wide }: { title: string; onClose: () 
   );
 }
 
-function ConfirmDialog({ title, message, busy, onCancel, onConfirm }: { title: string; message: string; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+// confirmLabel/confirmingLabel default to "Delete"/"Deleting…" so every
+// existing destructive-delete call site is unchanged — only call sites for
+// a non-destructive confirmation (e.g. Reset Attempts) need to override
+// them, otherwise the button text lies about what it's about to do.
+function ConfirmDialog({ title, message, busy, onCancel, onConfirm, confirmLabel = "Delete", confirmingLabel = "Deleting…", danger = true }: { title: string; message: string; busy: boolean; onCancel: () => void; onConfirm: () => void; confirmLabel?: string; confirmingLabel?: string; danger?: boolean }) {
   return (
     <Modal title={title} onClose={onCancel}>
       <div className={styles.confirmPanel}>
         <p>{message}</p>
         <div className={styles.confirmActions}>
           <button type="button" className={styles.secondaryBtn} onClick={onCancel}>Cancel</button>
-          <button type="button" className={styles.dangerBtn} disabled={busy} onClick={onConfirm}>{busy ? "Deleting…" : "Delete"}</button>
+          <button type="button" className={danger ? styles.dangerBtn : styles.primaryBtn} disabled={busy} onClick={onConfirm}>{busy ? confirmingLabel : confirmLabel}</button>
         </div>
       </div>
     </Modal>
@@ -1013,7 +1017,7 @@ function MatrixPanel({ token }: { token: string }) {
 // Training module and quiz builder
 // ---------------------------------------------------------------------------
 
-type TrainingModuleRow = { id: string; code: string; title: string; objective: string; duration_minutes: number; passing_score: number; sequence: number; status: string; sop_url?: string | null; sop_label?: string | null };
+type TrainingModuleRow = { id: string; code: string; title: string; objective: string; duration_minutes: number; passing_score: number; sequence: number; status: string; sop_url?: string | null; sop_label?: string | null; max_attempts?: number | null };
 type QuizQuestionRow = { id: string; prompt: string; options: string[]; correct_index: number; explanation: string };
 
 function QuizBuilderModal({ token, module, onClose }: { token: string; module: TrainingModuleRow; onClose: () => void }) {
@@ -1169,6 +1173,14 @@ function TrainingPanel({ token }: { token: string }) {
   const [quizModule, setQuizModule] = useState<TrainingModuleRow | null>(null);
   const [resourceModule, setResourceModule] = useState<TrainingModuleRow | null>(null);
   const [toast, setToast] = useState("");
+  // BUILD PROMPT v5 BLOCK F: org-wide fallback attempt cap.
+  const [orgDefaultMaxAttempts, setOrgDefaultMaxAttempts] = useState<number | null>(null);
+  const [orgSettingsOpen, setOrgSettingsOpen] = useState(false);
+  useEffect(() => {
+    request<{ default_max_quiz_attempts: number }>("/api/v1/admin/organization", token)
+      .then((org) => setOrgDefaultMaxAttempts(org.default_max_quiz_attempts))
+      .catch(() => {});
+  }, [token]);
 
   const createFields: FieldDef[] = [
     { key: "code", label: "Module Code", type: "text", required: true, placeholder: "e.g. TRN-23" },
@@ -1176,6 +1188,7 @@ function TrainingPanel({ token }: { token: string }) {
     { key: "objective", label: "Objective", type: "textarea", required: true },
     { key: "duration_minutes", label: "Duration (minutes)", type: "number", required: true },
     { key: "passing_score", label: "Passing Score (%)", type: "number" },
+    { key: "max_attempts", label: "Max Attempts", type: "number", helpText: `Leave blank to use the org default (${orgDefaultMaxAttempts ?? "…"}). Exceeding this without passing blocks further attempts until an admin resets them.` },
     { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
     { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
   ];
@@ -1184,6 +1197,7 @@ function TrainingPanel({ token }: { token: string }) {
     { key: "objective", label: "Objective", type: "textarea", required: true },
     { key: "duration_minutes", label: "Duration (minutes)", type: "number", required: true },
     { key: "passing_score", label: "Passing Score (%)", type: "number" },
+    { key: "max_attempts", label: "Max Attempts", type: "number", helpText: `Leave blank to use the org default (${orgDefaultMaxAttempts ?? "…"}). Exceeding this without passing blocks further attempts until an admin resets them.` },
     { key: "sop_url", label: "SOPGalaxy Link", type: "text", placeholder: "https://app.sopgalaxy.com/…" },
     { key: "sop_label", label: "SOP Link Text", type: "text", placeholder: "Defaults to “View SOP for this”", helpText: "Only used when a SOPGalaxy Link is set." },
     { key: "status", label: "Status", type: "select", required: true, options: [{ value: "draft", label: "Draft" }, { value: "published", label: "Published" }, { value: "archived", label: "Archived" }] },
@@ -1191,13 +1205,21 @@ function TrainingPanel({ token }: { token: string }) {
 
   return (
     <section>
-      <Toolbar q={list.q} onSearch={list.setQ} placeholder="Search training modules" createLabel="+ Add Module" onCreate={() => setModal({ mode: "create" })} />
+      <Toolbar
+        q={list.q}
+        onSearch={list.setQ}
+        placeholder="Search training modules"
+        createLabel="+ Add Module"
+        onCreate={() => setModal({ mode: "create" })}
+        extra={<button type="button" className={styles.secondaryBtn} onClick={() => setOrgSettingsOpen(true)}>⚙ Assessment Settings</button>}
+      />
       <Feedback error={list.error} toast={toast} />
       <DataTable
         columns={[
           { key: "code", label: "Code" },
           { key: "title", label: "Title", render: (row) => (<><b>{row.title}</b><small>{row.duration_minutes} min · Sequence {row.sequence}</small></>) },
-          { key: "passing_score", label: "Passing Score", render: (row) => `${row.passing_score}%` },
+          { key: "passing_score", label: "Passing Score", render: (row) => `${row.passing_score}% (score = % of questions correct)` },
+          { key: "max_attempts", label: "Max Attempts", render: (row) => row.max_attempts ?? `${orgDefaultMaxAttempts ?? "—"} (org default)` },
           { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
         ]}
         rows={list.items}
@@ -1220,7 +1242,7 @@ function TrainingPanel({ token }: { token: string }) {
           submitLabel={modal.mode === "create" ? "Create Module" : "Save Changes"}
           onCancel={() => setModal(null)}
           onSubmit={async (values) => {
-            const payload = { ...values, duration_minutes: Number(values.duration_minutes), passing_score: values.passing_score ? Number(values.passing_score) : undefined };
+            const payload = { ...values, duration_minutes: Number(values.duration_minutes), passing_score: values.passing_score ? Number(values.passing_score) : undefined, max_attempts: values.max_attempts ? Number(values.max_attempts) : null };
             if (modal.mode === "create") await submitJson("/api/v1/admin/training/modules", token, "POST", payload);
             else await submitJson(`/api/v1/admin/training/modules/${modal.row!.id}`, token, "PATCH", payload);
             setToast(`Module ${modal.mode === "create" ? "created" : "updated"} successfully. New modules start locked for every employee until assigned.`);
@@ -1231,6 +1253,22 @@ function TrainingPanel({ token }: { token: string }) {
       )}
       {quizModule && <QuizBuilderModal token={token} module={quizModule} onClose={() => setQuizModule(null)} />}
       {resourceModule && <ResourcesModal token={token} module={resourceModule} onClose={() => setResourceModule(null)} />}
+      {orgSettingsOpen && orgDefaultMaxAttempts !== null && (
+        <FormModal
+          title="Assessment Settings"
+          fields={[
+            { key: "default_max_quiz_attempts", label: "Default Max Attempts", type: "number", required: true, helpText: "Applies to every module that doesn't set its own Max Attempts. Exceeding it without passing blocks further attempts until an admin resets them." },
+          ]}
+          initialValues={{ default_max_quiz_attempts: orgDefaultMaxAttempts }}
+          submitLabel="Save Settings"
+          onCancel={() => setOrgSettingsOpen(false)}
+          onSubmit={async (values) => {
+            const updated = await submitJson("/api/v1/admin/organization", token, "PATCH", { default_max_quiz_attempts: Number(values.default_max_quiz_attempts) });
+            setOrgDefaultMaxAttempts(updated.default_max_quiz_attempts);
+            setOrgSettingsOpen(false); setToast("Assessment settings updated successfully."); setTimeout(() => setToast(""), 3000);
+          }}
+        />
+      )}
     </section>
   );
 }
@@ -1338,7 +1376,7 @@ function ResourcesModal({ token, module, onClose }: { token: string; module: Tra
 // Assignments and due dates
 // ---------------------------------------------------------------------------
 
-type EnrollmentRow = { id: string; status: string; progress_percent: number; best_score: number | null; due_date: string | null; employee: { id: string; full_name: string; email: string } | null; module: { id: string; title: string; code: string } | null };
+type EnrollmentRow = { id: string; status: string; progress_percent: number; best_score: number | null; due_date: string | null; onboarding_blocked?: boolean; employee: { id: string; full_name: string; email: string } | null; module: { id: string; title: string; code: string } | null };
 
 function AssignmentsPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
@@ -1352,7 +1390,10 @@ function AssignmentsPanel({ token }: { token: string }) {
   }, [token]);
   const [assignOpen, setAssignOpen] = useState(false);
   const [dueEdit, setDueEdit] = useState<EnrollmentRow | null>(null);
+  const [confirmReset, setConfirmReset] = useState<EnrollmentRow | null>(null);
+  const [resetting, setResetting] = useState(false);
   const [toast, setToast] = useState("");
+  const [error, setError] = useState("");
 
   return (
     <section>
@@ -1363,12 +1404,20 @@ function AssignmentsPanel({ token }: { token: string }) {
         </select>
         <button type="button" className={styles.primaryBtn} onClick={() => setAssignOpen(true)}>+ Assign Training</button>
       </div>
-      <Feedback error={list.error} toast={toast} />
+      <Feedback error={list.error || error} toast={toast} />
       <DataTable
         columns={[
           { key: "employee", label: "Employee", render: (row) => (<><b>{row.employee?.full_name || "—"}</b><small>{row.employee?.email}</small></>) },
           { key: "module", label: "Module", render: (row) => (<><b>{row.module?.code}</b><small>{row.module?.title}</small></>) },
-          { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
+          {
+            key: "status",
+            label: "Status",
+            render: (row) => row.onboarding_blocked ? (
+              <><StatusBadge status={row.status} /><small style={{ display: "block", marginTop: 4, color: "#c0392b", fontWeight: 700 }}>Attempts exhausted</small></>
+            ) : (
+              <StatusBadge status={row.status} />
+            ),
+          },
           { key: "due_date", label: "Due Date", render: (row) => formatDate(row.due_date) },
           { key: "best_score", label: "Best Score", render: (row) => (row.best_score == null ? "—" : `${row.best_score}%`) },
         ]}
@@ -1376,7 +1425,12 @@ function AssignmentsPanel({ token }: { token: string }) {
         rowId={(row) => row.id}
         loading={list.loading}
         actions={(row) => (
-          <button className={styles.iconBtn} data-tip="Set due date" onClick={() => setDueEdit(row)}>📅</button>
+          <div className={styles.workflowRow}>
+            <button className={styles.iconBtn} data-tip="Set due date" onClick={() => setDueEdit(row)}>📅</button>
+            {row.onboarding_blocked && (
+              <button className={styles.iconBtn} data-tip="Reset attempts" onClick={() => setConfirmReset(row)}>↺</button>
+            )}
+          </div>
         )}
       />
       <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
@@ -1404,6 +1458,29 @@ function AssignmentsPanel({ token }: { token: string }) {
             await submitJson(`/api/v1/admin/enrollments/${dueEdit.id}`, token, "PATCH", { due_date: values.due_date || null });
             setDueEdit(null); setReloadKey((k) => k + 1);
             setToast("Due date updated successfully."); setTimeout(() => setToast(""), 3000);
+          }}
+        />
+      )}
+      {confirmReset && (
+        <ConfirmDialog
+          title="Reset Attempts"
+          message={`Are you sure you want to reset ${confirmReset.employee?.full_name}'s attempts for "${confirmReset.module?.title}"? They'll be able to attempt the assessment again from a clean count.`}
+          busy={resetting}
+          confirmLabel="Reset Attempts"
+          confirmingLabel="Resetting…"
+          danger={false}
+          onCancel={() => setConfirmReset(null)}
+          onConfirm={async () => {
+            setResetting(true);
+            try {
+              await submitJson(`/api/v1/admin/enrollments/${confirmReset.id}/reset-attempts`, token, "POST");
+              setConfirmReset(null); setReloadKey((k) => k + 1);
+              setToast("Attempts reset successfully."); setTimeout(() => setToast(""), 3000);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not reset attempts.");
+            } finally {
+              setResetting(false);
+            }
           }}
         />
       )}
