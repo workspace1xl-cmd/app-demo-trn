@@ -1581,7 +1581,10 @@ function AssignModal({ token, modules, employees, onCancel, onAssigned }: { toke
 // Unresolved-question governance queue
 // ---------------------------------------------------------------------------
 
-type FeedbackRow = { id: string; type: string; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; employee: string; created_at: string };
+// QA REMEDIATION BLOCKER 6: department_id/department_name — auto-routed
+// at submission (best-matching activity's department) or assigned by an
+// Admin, not a single flat undifferentiated queue.
+type FeedbackRow = { id: string; type: string; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; department_id: string | null; department_name: string | null; employee: string; created_at: string };
 
 const QUERY_STATUSES = ["open", "in_review", "resolved", "dismissed"];
 // BUILD PROMPT v5 BLOCK G: the same 5-state lifecycle Block D's Rules &
@@ -1604,8 +1607,14 @@ function FeedbackPanel({ token }: { token: string }) {
 function FeedbackQueueTab({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [statusFilter, setStatusFilter] = useState("open");
-  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&type=query&status=${statusFilter}`, reloadKey, statusFilter);
+  // QA REMEDIATION BLOCKER 6: optional department filter — "he should
+  // have that visibility of that particular department only" applied to
+  // the queue view itself, same convention as the status tabs above it.
+  const [departmentFilter, setDepartmentFilter] = useState("");
+  const departments = useLookup<{ id: string; name: string }>(token, "/api/v1/admin/departments");
+  const list = usePagedList<FeedbackRow>(token, (page, size) => `/api/v1/admin/feedback?page=${page}&page_size=${size}&type=query&status=${statusFilter}${departmentFilter ? `&department_id=${departmentFilter}` : ""}`, reloadKey, `${statusFilter}:${departmentFilter}`);
   const [resolveRow, setResolveRow] = useState<FeedbackRow | null>(null);
+  const [assignRow, setAssignRow] = useState<FeedbackRow | null>(null);
   const [toast, setToast] = useState("");
 
   return (
@@ -1617,11 +1626,21 @@ function FeedbackQueueTab({ token }: { token: string }) {
           </button>
         ))}
       </div>
+      <div className={styles.field} style={{ maxWidth: 260, marginBottom: 12 }}>
+        <label>Filter by Department</label>
+        <select value={departmentFilter} onChange={(e) => setDepartmentFilter(e.target.value)}>
+          <option value="">All departments</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.id}>{d.name}</option>
+          ))}
+        </select>
+      </div>
       <Feedback error={list.error} toast={toast} />
       <DataTable
         columns={[
           { key: "query", label: "Question", render: (row) => (<><b>{row.query}</b><small>Asked by {row.employee}</small></>) },
           { key: "reason", label: "Reason Reported" },
+          { key: "department_name", label: "Department", render: (row) => row.department_name || "Unassigned" },
           { key: "resolution", label: "Resolution", render: (row) => row.resolution || "—" },
         ]}
         rows={list.items}
@@ -1630,10 +1649,31 @@ function FeedbackQueueTab({ token }: { token: string }) {
         actions={(row) => (
           row.status === "resolved" || row.status === "dismissed"
             ? <span style={{ fontSize: 8, color: "#8b8f9e" }}>Closed</span>
-            : <button className={styles.secondaryBtn} onClick={() => setResolveRow(row)}>Resolve</button>
+            : (
+              <div className={styles.workflowRow}>
+                <button className={styles.secondaryBtn} onClick={() => setAssignRow(row)}>Assign</button>
+                <button className={styles.secondaryBtn} onClick={() => setResolveRow(row)}>Resolve</button>
+              </div>
+            )
         )}
       />
       <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
+      {assignRow && (
+        <FormModal
+          title={`Assign Department — ${assignRow.query}`}
+          fields={[
+            { key: "department_id", label: "Department", type: "select", options: departments.map((d) => ({ value: d.id, label: d.name })), helpText: "Leave blank to clear the assignment." },
+          ]}
+          initialValues={{ department_id: assignRow.department_id || "" }}
+          submitLabel="Save Assignment"
+          onCancel={() => setAssignRow(null)}
+          onSubmit={async (values) => {
+            await submitJson(`/api/v1/admin/feedback/${assignRow.id}`, token, "PATCH", values);
+            setAssignRow(null); setReloadKey((k) => k + 1);
+            setToast("Department assignment saved successfully."); setTimeout(() => setToast(""), 3000);
+          }}
+        />
+      )}
       {resolveRow && (
         <FormModal
           title={`Resolve — ${resolveRow.query}`}
