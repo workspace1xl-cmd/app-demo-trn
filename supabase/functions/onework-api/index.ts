@@ -1762,6 +1762,19 @@ Deno.serve(async (req) => {
     }
     const ruleReadMatch = path.match(/^\/api\/v1\/rules\/versions\/([^/]+)\/read$/);
     if (ruleReadMatch && req.method === "POST") {
+      // QA REMEDIATION MEDIUM 13: found while verifying department-scoped
+      // rule access can't be bypassed server-side — this route never
+      // checked org_id at all. An employee could POST any real
+      // rule_version_id (not even guessed — an admin's own API response
+      // exposes them) belonging to a COMPLETELY DIFFERENT organisation
+      // and successfully record themselves as having "read" it. No rule
+      // content is disclosed by this route, but it's still an arbitrary
+      // cross-tenant write with zero authorization check — confirmed live
+      // before this fix (a second org's rule, marked read by an
+      // unrelated employee, returned 200 ok:true). Now scoped: the
+      // version must resolve to a rule in the caller's own org.
+      const { data: version } = await supabase.from("rule_versions").select("id,rules!inner(org_id)").eq("id", ruleReadMatch[1]).maybeSingle();
+      if (!version || (version as any).rules?.org_id !== user.org_id) return json({ detail: "Rule version not found." }, 404);
       // Idempotent — same pattern as every other "mark as done" route in
       // this app (Block A's acknowledge, Block B's item-complete).
       const { error } = await supabase.from("rule_reads").upsert({ rule_version_id: ruleReadMatch[1], user_id: user.id }, { onConflict: "rule_version_id,user_id", ignoreDuplicates: true });

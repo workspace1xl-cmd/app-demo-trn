@@ -1384,6 +1384,13 @@ def list_my_rules(user: User = Depends(current_user), db: Session = Depends(get_
 
 @app.post("/api/v1/rules/versions/{version_id}/read")
 def mark_rule_read(version_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    # QA REMEDIATION MEDIUM 13: mirrors the Edge Function — this route
+    # never checked org_id at all, so an employee could mark any real
+    # rule_version_id (even one belonging to a completely different
+    # organisation) as read with zero authorization check.
+    version = db.get(RuleVersion, version_id)
+    if not version or not (rule := db.get(Rule, version.rule_id)) or rule.org_id != user.org_id:
+        raise HTTPException(404, "Rule version not found.")
     # Idempotent — same pattern as every other "mark as done" route.
     if not db.scalar(select(RuleRead).where(RuleRead.rule_version_id == version_id, RuleRead.user_id == user.id)):
         db.add(RuleRead(rule_version_id=version_id, user_id=user.id))
