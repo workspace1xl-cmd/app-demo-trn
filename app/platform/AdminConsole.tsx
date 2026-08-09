@@ -98,7 +98,13 @@ function Pagination({ page, pageSize, total, onPage, onPageSize }: { page: numbe
   return (
     <div className={styles.pagination}>
       <span className="pageInfo" style={{ fontSize: 8, color: "#8b8f9e" }}>
-        {total === 0 ? "Showing 0 records" : `Showing ${from}–${to} of ${total} records`}
+        {/* QA REMEDIATION MEDIUM 15: bare "Showing 0 records" replaced
+            with the same purposeful, reassuring tone Knowledge Search's
+            no-match state already sets ("didn't match... it's been
+            logged for the knowledge team to review") — state what's
+            true, then what happens next, not the same words reused
+            everywhere. */}
+        {total === 0 ? "No records to show yet — they'll appear here once added." : `Showing ${from}–${to} of ${total} records`}
       </span>
       <div className={styles.pageControls}>
         <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))} aria-label="Records per page">
@@ -127,7 +133,12 @@ function DataTable<T>({ columns, rows, rowId, loading, actions }: { columns: Col
   // not a missing CSS transition. Only the genuine first load (no rows
   // yet) gets the full loading state.
   if (loading && !rows.length) return <div className={styles.loading}>Synchronising verified data…</div>;
-  if (!loading && !rows.length) return <div className={styles.noRecords}>No records found.</div>;
+  // QA REMEDIATION MEDIUM 15: bare "No records found." replaced with the
+  // same purposeful, reassuring tone Knowledge Search's no-match state
+  // already sets — state what's true, then what to expect next, reusing
+  // that standard rather than inventing a new one. Shared across every
+  // admin table that doesn't pass its own more specific empty message.
+  if (!loading && !rows.length) return <div className={styles.noRecords}>No records found. Nothing here yet — new entries will appear as soon as they&apos;re added.</div>;
   return (
     <div className={styles.dataTable} data-syncing={loading && rows.length > 0 ? "true" : "false"}>
       <table>
