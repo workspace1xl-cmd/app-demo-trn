@@ -1385,7 +1385,7 @@ Deno.serve(async (req) => {
       const body = await req.json();
       if (!body.file_name?.trim()) return fieldError("file_name", "Choose a file to upload.");
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
-      if (!["document","video","sop","mistake_register","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
+      if (!["document","video","audio","sop","mistake_register","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
       const messageSubtypeError = validateMessageSubtype(body.kind, body.message_subtype);
       if (messageSubtypeError) return messageSubtypeError;
       const safeName = body.file_name.trim().replace(/[^a-zA-Z0-9_.-]/g, "-");
@@ -1401,7 +1401,7 @@ Deno.serve(async (req) => {
       const body = await req.json();
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
       if (!body.external_url?.trim() || !/^https?:\/\//i.test(body.external_url.trim())) return fieldError("external_url", "Enter a valid link starting with http:// or https://.");
-      if (!["document","video","sop","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
+      if (!["document","video","audio","sop","template","image","onboarding_message"].includes(body.kind)) return fieldError("kind", "Select a valid content type.");
       const messageSubtypeError = validateMessageSubtype(body.kind, body.message_subtype);
       if (messageSubtypeError) return messageSubtypeError;
       const { data: asset, error } = await supabase.from("content_assets").insert({ org_id: user.org_id, kind: body.kind, message_subtype: body.kind === "onboarding_message" ? body.message_subtype : null, title: body.title.trim(), description: body.description?.trim() || null, department: body.department || null, external_url: body.external_url.trim(), sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, uploaded_by: user.id, status: "ready" }).select().single();
@@ -1486,21 +1486,21 @@ Deno.serve(async (req) => {
     if (path === "/api/v1/admin/rules" && req.method === "GET") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const [{ data: rules, error }, { data: departments }, { data: versions }] = await Promise.all([
-        supabase.from("rules").select("id,department_id,title,category,is_mandatory,status,published_version_id,sop_url,sop_label,created_at").eq("org_id", user.org_id).order("created_at", { ascending: false }),
+        supabase.from("rules").select("id,department_id,title,category,is_mandatory,status,published_version_id,sop_url,sop_label,attachment_asset_id,content_assets(title,kind,external_url,storage_path),created_at").eq("org_id", user.org_id).order("created_at", { ascending: false }),
         supabase.from("departments").select("id,name").eq("org_id", user.org_id),
         supabase.from("rule_versions").select("id,rule_id,version,body,created_at").order("version", { ascending: false }),
       ]);
       if (error) throw error;
       const deptById = new Map((departments || []).map((d) => [d.id, d.name]));
       const versionById = new Map((versions || []).map((v) => [v.id, v]));
-      return json((rules || []).map((r) => ({ ...r, department_name: r.department_id ? deptById.get(r.department_id) || null : null, published_version: r.published_version_id ? versionById.get(r.published_version_id) || null : null })));
+      return json((rules || []).map((r: any) => { const { content_assets, ...rest } = r; return { ...rest, department_name: r.department_id ? deptById.get(r.department_id) || null : null, published_version: r.published_version_id ? versionById.get(r.published_version_id) || null : null, attachment: content_assets || null }; }));
     }
     if (path === "/api/v1/admin/rules" && req.method === "POST") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const body = await req.json();
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
       if (!body.body?.trim()) return fieldError("body", "Rule content is required.");
-      const { data: rule, error } = await supabase.from("rules").insert({ org_id: user.org_id, department_id: body.department_id || null, title: body.title.trim(), category: body.category?.trim() || "general", is_mandatory: body.is_mandatory !== false, sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, created_by: user.id }).select().single();
+      const { data: rule, error } = await supabase.from("rules").insert({ org_id: user.org_id, department_id: body.department_id || null, title: body.title.trim(), category: body.category?.trim() || "general", is_mandatory: body.is_mandatory !== false, sop_url: body.sop_url?.trim() || null, sop_label: body.sop_label?.trim() || null, attachment_asset_id: body.attachment_asset_id || null, created_by: user.id }).select().single();
       if (error) throw error;
       const { data: version, error: vError } = await supabase.from("rule_versions").insert({ rule_id: rule.id, version: 1, body: body.body.trim(), created_by: user.id }).select().single();
       if (vError) throw vError;
@@ -1518,6 +1518,7 @@ Deno.serve(async (req) => {
       if (body.status !== undefined) patch.status = body.status;
       if (body.sop_url !== undefined) patch.sop_url = String(body.sop_url).trim() || null;
       if (body.sop_label !== undefined) patch.sop_label = String(body.sop_label).trim() || null;
+      if (body.attachment_asset_id !== undefined) patch.attachment_asset_id = body.attachment_asset_id || null;
       const { data, error } = await supabase.from("rules").update(patch).eq("id", ruleMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
       if (error) throw error; if (!data) return json({ detail: "Rule not found." }, 404);
       await audit(user, "rule.update", "rule", data.id); return json(data);
@@ -1570,18 +1571,30 @@ Deno.serve(async (req) => {
     // applies org-wide; otherwise only to that department.
     // -------------------------------------------------------------------
     if (path === "/api/v1/rules" && req.method === "GET") {
+      // BUILD PROMPT v5 BLOCK I: content_assets(...) resolves a rule's
+      // attached video/audio/image/document, same as Block C's
+      // content_block resolution — a real attachment, not just a link.
       const [{ data: rules, error }, { data: reads }] = await Promise.all([
-        supabase.from("rules").select("id,department_id,title,category,is_mandatory,published_version_id,sop_url,sop_label,rule_versions!rules_published_version_id_fkey(id,version,body,created_at)").eq("org_id", user.org_id).eq("status", "active").or(`department_id.is.null,department_id.eq.${user.department_id || "00000000-0000-0000-0000-000000000000"}`),
+        supabase.from("rules").select("id,department_id,title,category,is_mandatory,published_version_id,sop_url,sop_label,attachment_asset_id,content_assets(title,kind,external_url,storage_path),rule_versions!rules_published_version_id_fkey(id,version,body,created_at)").eq("org_id", user.org_id).eq("status", "active").or(`department_id.is.null,department_id.eq.${user.department_id || "00000000-0000-0000-0000-000000000000"}`),
         supabase.from("rule_reads").select("rule_version_id").eq("user_id", user.id),
       ]);
       if (error) throw error;
       const readVersionIds = new Set((reads || []).map((r) => r.rule_version_id));
-      return json((rules || []).map((r: any) => ({
-        id: r.id, title: r.title, category: r.category, is_mandatory: r.is_mandatory,
-        version_id: r.rule_versions?.id || null, version: r.rule_versions?.version || null, body: r.rule_versions?.body || null,
-        sop_url: r.sop_url || null, sop_label: r.sop_label || null,
-        read: r.rule_versions?.id ? readVersionIds.has(r.rule_versions.id) : false,
-      })));
+      const shaped = await Promise.all((rules || []).map(async (r: any) => {
+        let attachmentUrl: string | null = r.content_assets?.external_url || null;
+        if (!attachmentUrl && r.content_assets?.storage_path) {
+          const { data: signed } = await supabase.storage.from(CONTENT_BUCKET).createSignedUrl(r.content_assets.storage_path, 3600);
+          attachmentUrl = signed?.signedUrl || null;
+        }
+        return {
+          id: r.id, title: r.title, category: r.category, is_mandatory: r.is_mandatory,
+          version_id: r.rule_versions?.id || null, version: r.rule_versions?.version || null, body: r.rule_versions?.body || null,
+          sop_url: r.sop_url || null, sop_label: r.sop_label || null,
+          attachment: r.content_assets ? { title: r.content_assets.title, kind: r.content_assets.kind, url: attachmentUrl } : null,
+          read: r.rule_versions?.id ? readVersionIds.has(r.rule_versions.id) : false,
+        };
+      }));
+      return json(shaped);
     }
     const ruleReadMatch = path.match(/^\/api\/v1\/rules\/versions\/([^/]+)\/read$/);
     if (ruleReadMatch && req.method === "POST") {

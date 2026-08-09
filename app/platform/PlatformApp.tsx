@@ -93,7 +93,7 @@ type JourneyStage = { id: string; name: string; description: string; sequence: n
 type Journey = { stages: JourneyStage[]; journey_complete: boolean };
 
 // BUILD PROMPT v5 BLOCK D: Rules & Regulations.
-type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; sop_url?: string | null; sop_label?: string | null; read: boolean };
+type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; sop_url?: string | null; sop_label?: string | null; attachment?: { title: string; kind: string; url: string | null } | null; read: boolean };
 
 // BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — "My Submissions".
 type MySubmission = { id: string; type: "query" | "suggestion"; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; created_at: string; resolved_at: string | null };
@@ -1449,6 +1449,20 @@ export default function WorkingPlatform() {
                           <>
                             <p style={{ color: "#17182f", whiteSpace: "pre-wrap", marginTop: 10 }}>{rule.body}</p>
                             {rule.sop_url && <div style={{ marginTop: 8 }}><SopLink url={rule.sop_url} label={rule.sop_label} /></div>}
+                            {/* BUILD PROMPT v5 BLOCK I: a real attached
+                                video/audio/image/document — opens in the
+                                same in-app viewer My Learning already
+                                uses, not just an external link. */}
+                            {rule.attachment && (
+                              <button
+                                type="button"
+                                className={styles.journeyLinkBtn}
+                                style={{ display: "block", marginTop: 8 }}
+                                onClick={() => setActiveVideo({ resource_type: rule.attachment!.kind, title: rule.attachment!.title, kind: rule.attachment!.kind, url: rule.attachment!.url })}
+                              >
+                                {rule.attachment.kind === "audio" ? "▶ Play" : rule.attachment.kind === "image" ? "🖼 View" : "▶ Watch"} {rule.attachment.title} →
+                              </button>
+                            )}
                             <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
                               {!rule.read && rule.version_id && (
                                 <button type="button" className={styles.journeyDoneBtn} disabled={ruleReadBusyId === rule.version_id} onClick={() => markRuleRead(rule.version_id!)}>
@@ -1757,7 +1771,19 @@ export default function WorkingPlatform() {
               <button type="button" onClick={() => setActiveVideo(null)} aria-label="Close">✕</button>
             </div>
             <div className={styles.videoFrame}>
-              {activeVideo.url && youtubeEmbedUrl(activeVideo.url) ? (
+              {/* BUILD PROMPT v5 BLOCK I: this modal now handles every
+                  attachment kind Content Library supports, not just video
+                  — audio gets a native player, image a plain <img>, video
+                  still prefers a YouTube embed when the link is one. */}
+              {activeVideo.kind === "audio" ? (
+                <audio src={activeVideo.url ?? undefined} controls style={{ width: "100%" }} />
+              ) : activeVideo.kind === "image" ? (
+                // Source is a dynamic Supabase signed URL or arbitrary
+                // external link, not a domain next/image can be configured
+                // against.
+                // eslint-disable-next-line @next/next/no-img-element
+                activeVideo.url ? <img src={activeVideo.url} alt={activeVideo.title} style={{ maxWidth: "100%", maxHeight: "70vh", display: "block", margin: "0 auto" }} /> : null
+              ) : activeVideo.url && youtubeEmbedUrl(activeVideo.url) ? (
                 <iframe
                   src={youtubeEmbedUrl(activeVideo.url)!}
                   title={activeVideo.title}

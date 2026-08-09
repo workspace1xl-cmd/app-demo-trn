@@ -1182,7 +1182,7 @@ def list_rules(user: User = Depends(admin_user), db: Session = Depends(get_db)):
         {"id": r.id, "department_id": r.department_id, "department_name": dept_by_id.get(r.department_id) if r.department_id else None,
          "title": r.title, "category": r.category, "is_mandatory": r.is_mandatory, "status": r.status,
          "published_version_id": r.published_version_id, "published_version": _rule_version_dict(version_by_id[r.published_version_id]) if r.published_version_id in version_by_id else None,
-         "sop_url": r.sop_url, "sop_label": r.sop_label,
+         "sop_url": r.sop_url, "sop_label": r.sop_label, "attachment_asset_id": r.attachment_asset_id, "attachment": None,
          "created_at": r.created_at.isoformat()}
         for r in rules
     ]
@@ -1198,7 +1198,8 @@ def create_rule(payload: dict, user: User = Depends(admin_user), db: Session = D
         raise HTTPException(400, {"detail": "Rule content is required.", "field": "body"})
     rule = Rule(org_id=user.org_id, department_id=payload.get("department_id") or None, title=title,
                 category=str(payload.get("category") or "general").strip(), is_mandatory=payload.get("is_mandatory") is not False,
-                sop_url=str(payload.get("sop_url") or "").strip() or None, sop_label=str(payload.get("sop_label") or "").strip() or None, created_by=user.id)
+                sop_url=str(payload.get("sop_url") or "").strip() or None, sop_label=str(payload.get("sop_label") or "").strip() or None,
+                attachment_asset_id=payload.get("attachment_asset_id") or None, created_by=user.id)
     db.add(rule); db.flush()
     version = RuleVersion(rule_id=rule.id, version=1, body=body, created_by=user.id)
     db.add(version); db.flush()
@@ -1206,7 +1207,7 @@ def create_rule(payload: dict, user: User = Depends(admin_user), db: Session = D
     audit(db, user, "rule.create", "rule", rule.id, {"title": rule.title}); db.commit()
     return {"id": rule.id, "title": rule.title, "department_id": rule.department_id, "category": rule.category,
             "is_mandatory": rule.is_mandatory, "status": rule.status, "published_version_id": rule.published_version_id,
-            "sop_url": rule.sop_url, "sop_label": rule.sop_label}
+            "sop_url": rule.sop_url, "sop_label": rule.sop_label, "attachment_asset_id": rule.attachment_asset_id}
 
 
 @app.patch("/api/v1/admin/rules/{rule_id}")
@@ -1221,10 +1222,11 @@ def update_rule(rule_id: str, payload: dict, user: User = Depends(admin_user), d
     if "status" in payload: rule.status = payload["status"]
     if "sop_url" in payload: rule.sop_url = str(payload["sop_url"] or "").strip() or None
     if "sop_label" in payload: rule.sop_label = str(payload["sop_label"] or "").strip() or None
+    if "attachment_asset_id" in payload: rule.attachment_asset_id = payload["attachment_asset_id"] or None
     audit(db, user, "rule.update", "rule", rule.id); db.commit()
     return {"id": rule.id, "title": rule.title, "department_id": rule.department_id, "category": rule.category,
             "is_mandatory": rule.is_mandatory, "status": rule.status, "published_version_id": rule.published_version_id,
-            "sop_url": rule.sop_url, "sop_label": rule.sop_label}
+            "sop_url": rule.sop_url, "sop_label": rule.sop_label, "attachment_asset_id": rule.attachment_asset_id}
 
 
 @app.post("/api/v1/admin/rules/{rule_id}/versions", status_code=201)
@@ -1301,6 +1303,9 @@ def list_my_rules(user: User = Depends(current_user), db: Session = Depends(get_
         out.append({"id": r.id, "title": r.title, "category": r.category, "is_mandatory": r.is_mandatory,
                      "version_id": v.id if v else None, "version": v.version if v else None, "body": v.body if v else None,
                      "sop_url": r.sop_url, "sop_label": r.sop_label,
+                     # attachment always None here — Content Library isn't
+                     # mirrored in this stack (see Rule.attachment_asset_id).
+                     "attachment": None,
                      "read": v.id in read_version_ids if v else False})
     return out
 
