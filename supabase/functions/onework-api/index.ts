@@ -1572,13 +1572,40 @@ Deno.serve(async (req) => {
       if (body.sop_url !== undefined) patch.sop_url = String(body.sop_url).trim() || null;
       if (body.sop_label !== undefined) patch.sop_label = String(body.sop_label).trim() || null;
       if (body.attachment_asset_id !== undefined) patch.attachment_asset_id = body.attachment_asset_id || null;
+      // QA REMEDIATION BLOCKER 4: management's words — "how do I change
+      // an existing rule?" — with the expectation that editing it (title,
+      // category, or content) is a real, tracked change: it must bump the
+      // version and require everyone who already acknowledged the old one
+      // to re-acknowledge. Previously the Edit dialog didn't even have a
+      // body field, and editing title/category via PATCH silently left
+      // published_version_id untouched — a title correction looked
+      // identical to a no-op to every employee's read status. Now every
+      // edit through this route creates a new rule_versions row (read
+      // tracking is keyed by rule_version_id, so a new version id is what
+      // actually clears everyone's read status — no separate "reset
+      // reads" table needed). The standalone "New Version" action
+      // (POST .../versions) still exists unchanged for a content-only
+      // publish that doesn't touch title/category/etc.
+      if (body.body !== undefined && !String(body.body).trim()) return fieldError("body", "Rule content is required.");
+      const { data: existing } = await supabase.from("rules").select("id,published_version_id").eq("id", ruleMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      if (!existing) return json({ detail: "Rule not found." }, 404);
+      let newVersionId: string | undefined;
+      const newBody = body.body !== undefined ? String(body.body).trim() : undefined;
+      if (newBody !== undefined) {
+        const { data: latest } = await supabase.from("rule_versions").select("version").eq("rule_id", existing.id).order("version", { ascending: false }).limit(1).maybeSingle();
+        const nextVersion = (latest?.version || 0) + 1;
+        const { data: version, error: vError } = await supabase.from("rule_versions").insert({ rule_id: existing.id, version: nextVersion, body: newBody, created_by: user.id }).select().single();
+        if (vError) throw vError;
+        newVersionId = version.id;
+        patch.published_version_id = version.id;
+      }
       const { data, error } = await supabase.from("rules").update(patch).eq("id", ruleMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
       if (error) throw error; if (!data) return json({ detail: "Rule not found." }, 404);
-      await audit(user, "rule.update", "rule", data.id); return json(data);
+      await audit(user, "rule.update", "rule", data.id, newVersionId ? { new_version_id: newVersionId } : undefined); return json(data);
     }
-    // A new version is a distinct action from editing metadata — it's the
-    // one that actually invalidates everyone's read status, so it gets its
-    // own explicit route rather than being folded into PATCH.
+    // A content-only publish, kept separate from the general Edit dialog
+    // above for admins who just want to push a body update without
+    // touching any metadata.
     const ruleVersionMatch = path.match(/^\/api\/v1\/admin\/rules\/([^/]+)\/versions$/);
     if (ruleVersionMatch && req.method === "POST") {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
