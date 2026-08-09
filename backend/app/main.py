@@ -812,15 +812,20 @@ async def knowledge_search(payload: SearchRequest, user: User = Depends(current_
     activity_clause = or_(*[or_(Activity.name.ilike(f"%{t}%"), Activity.department.ilike(f"%{t}%"), Activity.responsible_role.ilike(f"%{t}%")) for t in terms])
     module_clause = or_(*[or_(TrainingModule.title.ilike(f"%{t}%"), TrainingModule.objective.ilike(f"%{t}%"), TrainingModule.code.ilike(f"%{t}%")) for t in terms])
     mistake_clause = or_(*[or_(MistakeRegisterEntry.title.ilike(f"%{t}%"), MistakeRegisterEntry.description.ilike(f"%{t}%"), MistakeRegisterEntry.category.ilike(f"%{t}%")) for t in terms])
+    # QA REMEDIATION BLOCKER 5: mirrors the Edge Function — a resolved
+    # query previously only reached the original submitter via
+    # notification; nobody else could ever find it through search.
+    resolved_query_clause = or_(*[or_(KnowledgeFeedback.query.ilike(f"%{t}%"), KnowledgeFeedback.resolution.ilike(f"%{t}%")) for t in terms])
     activities = db.scalars(select(Activity).where(Activity.org_id == user.org_id, activity_clause).limit(5)).all()
     modules = db.scalars(select(TrainingModule).where(TrainingModule.org_id == user.org_id, module_clause).limit(5)).all()
     mistakes = db.scalars(select(MistakeRegisterEntry).where(MistakeRegisterEntry.org_id == user.org_id, MistakeRegisterEntry.status == "active", mistake_clause).limit(3)).all()
+    resolved_queries = db.scalars(select(KnowledgeFeedback).where(KnowledgeFeedback.org_id == user.org_id, KnowledgeFeedback.type == "query", KnowledgeFeedback.status == "resolved", resolved_query_clause).limit(3)).all()
     # SOP documents live in SOPGalaxy, not a table this backend queries — the
     # only SOP-related signal in context is each activity's own sop_link.
-    context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" + (f"; SOP: {a.sop_link}" if a.sop_link else "") for a in activities] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules] + [f"Common mistake {mk.code}: {mk.title}. {mk.description} Correct practice: {mk.correct_practice}" for mk in mistakes])
+    context = "\n".join([f"Activity: {a.name}; owner {a.responsible_role}; contact {a.contact_details}; SLA {a.sla}; escalation {a.escalation_level_1} then {a.escalation_level_2}; steps {a.process_steps}" + (f"; SOP: {a.sop_link}" if a.sop_link else "") for a in activities] + [f"Training: {m.code} {m.title}; {m.objective}" for m in modules] + [f"Common mistake {mk.code}: {mk.title}. {mk.description} Correct practice: {mk.correct_practice}" for mk in mistakes] + [f"Previously answered question \"{rq.query}\": {rq.resolution}" for rq in resolved_queries])
     ai_answer = await claude_summary(payload.query, context) if context else None
-    audit(db, user, "knowledge.search", "search", details={"query": payload.query, "result_count": len(activities) + len(modules) + len(mistakes), "ai_used": bool(ai_answer)}); db.commit()
-    return {"query": payload.query, "answer": ai_answer or (f"Verified results found for {payload.query}. Use the official owner, channel and SLA below." if context else "No confirmed answer was found. Report this question for owner review."), "confidence": 0.93 if activities else 0.72 if context else 0.0, "ai_used": bool(ai_answer), "activities": [activity_dict(a) for a in activities], "modules": [module_dict(m) for m in modules], "mistakes": [row_dict(mk) for mk in mistakes], "unresolved": not bool(context)}
+    audit(db, user, "knowledge.search", "search", details={"query": payload.query, "result_count": len(activities) + len(modules) + len(mistakes) + len(resolved_queries), "ai_used": bool(ai_answer)}); db.commit()
+    return {"query": payload.query, "answer": ai_answer or (f"Verified results found for {payload.query}. Use the official owner, channel and SLA below." if context else "No confirmed answer was found. Report this question for owner review."), "confidence": 0.93 if activities else 0.72 if context else 0.0, "ai_used": bool(ai_answer), "activities": [activity_dict(a) for a in activities], "modules": [module_dict(m) for m in modules], "mistakes": [row_dict(mk) for mk in mistakes], "resolved_queries": [{"id": rq.id, "query": rq.query, "resolution": rq.resolution, "resolved_at": rq.resolved_at.isoformat() if rq.resolved_at else None} for rq in resolved_queries], "unresolved": not bool(context)}
 
 
 @app.post("/api/v1/feedback", status_code=201)
