@@ -833,9 +833,28 @@ Deno.serve(async (req) => {
       return json({ id: data.id, status: data.status, routed_to: data.routed_to }, 201);
     }
     if (path === "/api/v1/submissions/mine" && req.method === "GET") {
-      const { data, error } = await supabase.from("knowledge_feedback").select("id,type,query,reason,status,resolution,rejection_reason,target_implementation_date,created_at,resolved_at").eq("org_id", user.org_id).eq("user_id", user.id).order("created_at", { ascending: false });
-      if (error) throw error;
-      return json(data || []);
+      // QA REMEDIATION MEDIUM 14: "how will I know that if my suggestion
+      // is accepted or rejected." Per-rule "Suggest a change" submissions
+      // live in their own table (rule_change_suggestions) — this route
+      // only ever queried knowledge_feedback, so a rule suggestion never
+      // showed up here at all; the only place its status was visible was
+      // the separate /api/v1/rules/my-suggestions endpoint (unchanged,
+      // still exists), not the one unified view this route is meant to
+      // be. Merged in, normalised to the same shape the generic flow
+      // already uses — the generic flow itself is untouched.
+      const [{ data: feedback, error: feedbackError }, { data: ruleSuggestions, error: ruleError }] = await Promise.all([
+        supabase.from("knowledge_feedback").select("id,type,query,reason,status,resolution,rejection_reason,target_implementation_date,created_at,resolved_at").eq("org_id", user.org_id).eq("user_id", user.id),
+        supabase.from("rule_change_suggestions").select("id,suggestion_text,status,rejection_reason,target_implementation_date,created_at,reviewed_at,rules!inner(org_id,title)").eq("rules.org_id", user.org_id).eq("suggested_by", user.id),
+      ]);
+      if (feedbackError) throw feedbackError;
+      if (ruleError) throw ruleError;
+      const normalizedRuleSuggestions = (ruleSuggestions || []).map((rs: any) => ({
+        id: rs.id, type: "rule_suggestion", query: rs.suggestion_text, reason: `Rule: ${rs.rules?.title || "Unknown rule"}`,
+        status: rs.status, resolution: null, rejection_reason: rs.rejection_reason, target_implementation_date: rs.target_implementation_date,
+        created_at: rs.created_at, resolved_at: rs.reviewed_at,
+      }));
+      const combined = [...(feedback || []), ...normalizedRuleSuggestions].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      return json(combined);
     }
 
     // -------------------------------------------------------------------

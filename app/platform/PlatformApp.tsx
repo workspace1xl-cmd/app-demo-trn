@@ -105,7 +105,10 @@ type Journey = { stages: JourneyStage[]; journey_complete: boolean };
 type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; sop_url?: string | null; sop_label?: string | null; attachment?: { title: string; kind: string; url: string | null } | null; read: boolean };
 
 // BUILD PROMPT v5 BLOCK G: Suggestion & Query Engine — "My Submissions".
-type MySubmission = { id: string; type: "query" | "suggestion"; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; created_at: string; resolved_at: string | null };
+// QA REMEDIATION MEDIUM 14: "rule_suggestion" — a per-rule "Suggest a
+// change" submission, now merged into this same unified view instead of
+// only ever being visible via the separate Rules & Regulations screen.
+type MySubmission = { id: string; type: "query" | "suggestion" | "rule_suggestion"; query: string; reason: string; status: string; resolution: string | null; rejection_reason: string | null; target_implementation_date: string | null; created_at: string; resolved_at: string | null };
 
 // BUILD PROMPT v5 BLOCK H: Knowledge Search default state.
 type SearchQueryCount = { query: string; count: number };
@@ -1652,7 +1655,7 @@ export default function WorkingPlatform() {
                 {submissionsData.map((s) => (
                   <li key={s.id} className={styles.journeyStage} data-status={["resolved", "accepted", "implemented"].includes(s.status) ? "completed" : "available"}>
                     <div className={styles.journeyStageHead}>
-                      <span className={styles.journeyStageMark}>{s.type === "suggestion" ? "☆" : "?"}</span>
+                      <span className={styles.journeyStageMark}>{s.type === "query" ? "?" : "☆"}</span>
                       <div style={{ flex: 1 }}>
                         <h3>
                           {s.query}
@@ -1660,7 +1663,7 @@ export default function WorkingPlatform() {
                             {s.status.replace(/_/g, " ")}
                           </span>
                         </h3>
-                        <p>{s.type === "suggestion" ? "Suggestion" : "Query"} · {s.reason}</p>
+                        <p>{s.type === "query" ? "Query" : s.type === "rule_suggestion" ? "Rule Suggestion" : "Suggestion"} · {s.reason}</p>
                         {s.resolution && <p style={{ color: "#17182f", marginTop: 8 }}>Resolution: {s.resolution}</p>}
                         {s.rejection_reason && <p style={{ color: "#c0392b", marginTop: 8 }}>Rejection reason: {s.rejection_reason}</p>}
                         {s.target_implementation_date && <p style={{ color: "#17182f", marginTop: 8 }}>Target implementation date: {formatDate(s.target_implementation_date)}</p>}
