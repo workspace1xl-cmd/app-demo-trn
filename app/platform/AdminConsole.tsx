@@ -1948,6 +1948,184 @@ function ExecPanel({ token }: { token: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// BUILD PROMPT v5 BLOCK B: configure the stage-gated onboarding journey.
+// Stages arrive nested with their items in one call — this screen edits
+// both in place rather than being two separate list pages, since an item
+// is meaningless without its parent stage's context.
+// ---------------------------------------------------------------------------
+
+type JourneyAdminItem = { id: string; stage_id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; title: string; description: string; sequence: number };
+type JourneyAdminStage = { id: string; name: string; description: string; sequence: number; items: JourneyAdminItem[] };
+
+function OnboardingJourneyPanel({ token }: { token: string }) {
+  const [stages, setStages] = useState<JourneyAdminStage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState("");
+  const [error, setError] = useState("");
+  const [stageModal, setStageModal] = useState<null | { mode: "create" } | { mode: "edit"; row: JourneyAdminStage }>(null);
+  const [itemModal, setItemModal] = useState<null | { mode: "create"; stageId: string } | { mode: "edit"; stageId: string; row: JourneyAdminItem }>(null);
+  const [confirmDeleteStage, setConfirmDeleteStage] = useState<JourneyAdminStage | null>(null);
+  const [confirmDeleteItem, setConfirmDeleteItem] = useState<JourneyAdminItem | null>(null);
+  const [busy, setBusy] = useState(false);
+  const trainingModules = useLookup<{ id: string; title: string }>(token, "/api/v1/training/modules");
+
+  function load() {
+    request<JourneyAdminStage[]>("/api/v1/admin/onboarding-stages", token)
+      .then((data) => { setStages(data); setError(""); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load the onboarding journey."))
+      .finally(() => setLoading(false));
+  }
+  useEffect(() => { load(); }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const nextStageSequence = stages.length ? Math.max(...stages.map((s) => s.sequence)) + 1 : 1;
+  const stageFields: FieldDef[] = [
+    { key: "name", label: "Stage Name", type: "text", required: true },
+    { key: "description", label: "Description", type: "textarea" },
+    { key: "sequence", label: "Sequence", type: "number", required: true, helpText: "Order this stage unlocks in — 1 is first." },
+  ];
+
+  function itemFields(stageId: string): FieldDef[] {
+    const stage = stages.find((s) => s.id === stageId);
+    const nextItemSequence = stage?.items.length ? Math.max(...stage.items.map((i) => i.sequence)) + 1 : 1;
+    return [
+      { key: "item_type", label: "Item Type", type: "select", required: true, options: [
+        { value: "training_module", label: "Training Module (completes automatically)" },
+        { value: "custom_task", label: "Custom Task (employee marks it done)" },
+        { value: "content_block", label: "Content Block (employee marks it done)" },
+      ] },
+      { key: "training_module_id", label: "Training Module", type: "select", options: trainingModules.map((m) => ({ value: m.id, label: m.title })), helpText: "Only used when Item Type is Training Module." },
+      { key: "title", label: "Title", type: "text", required: true },
+      { key: "description", label: "Description", type: "textarea" },
+      { key: "sequence", label: "Sequence", type: "number", required: true, helpText: `Order this item appears in the stage — next free slot is ${nextItemSequence}.` },
+    ];
+  }
+
+  if (loading) return <div className={styles.loading}>Synchronising verified data…</div>;
+  return (
+    <section>
+      <div className={styles.formGrid} style={{ display: "block" }}>
+        <p style={{ color: "#7c8090", fontSize: 13, margin: "0 0 16px" }}>
+          New employees see these stages, in order, on their dashboard until every stage is complete. A stage unlocks
+          once the one before it is fully done. Rules &amp; Regulations acknowledgment isn&apos;t an item type yet —
+          that module doesn&apos;t exist yet either.
+        </p>
+        <Feedback error={error} toast={toast} />
+        <button type="button" className={styles.primaryBtn} onClick={() => setStageModal({ mode: "create" })} style={{ marginBottom: 18 }}>
+          + Add Stage
+        </button>
+        {stages.length === 0 && !error && <p style={{ color: "#8b8f9e", fontSize: 13 }}>No stages configured yet — new employees skip straight to the standard dashboard.</p>}
+        <div style={{ display: "grid", gap: 16 }}>
+          {stages.map((stage) => (
+            <div key={stage.id} style={{ border: "1px solid #e8e9f0", borderRadius: 15, padding: "18px 20px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                <div>
+                  <b style={{ fontSize: 15 }}>{stage.sequence}. {stage.name}</b>
+                  {stage.description && <p style={{ color: "#878b9a", fontSize: 13, margin: "4px 0 0" }}>{stage.description}</p>}
+                </div>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button className={styles.iconBtn} data-tip="Edit" onClick={() => setStageModal({ mode: "edit", row: stage })}>✎</button>
+                  <button className={styles.iconBtn} data-tip="Delete" data-danger="true" onClick={() => setConfirmDeleteStage(stage)}>🗑</button>
+                </div>
+              </div>
+              <ul style={{ listStyle: "none", margin: "14px 0 0", padding: 0, display: "grid", gap: 8 }}>
+                {stage.items.map((item) => (
+                  <li key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "#f8f8fb", borderRadius: 10, padding: "9px 12px" }}>
+                    <div>
+                      <b style={{ fontSize: 13 }}>{item.title}</b>
+                      <small style={{ display: "block", color: "#8b8f9e", fontSize: 12 }}>
+                        {item.item_type === "training_module" ? "Training Module (auto)" : item.item_type === "custom_task" ? "Custom Task" : "Content Block"}
+                        {item.description ? ` · ${item.description}` : ""}
+                      </small>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                      <button className={styles.iconBtn} data-tip="Edit" onClick={() => setItemModal({ mode: "edit", stageId: stage.id, row: item })}>✎</button>
+                      <button className={styles.iconBtn} data-tip="Delete" data-danger="true" onClick={() => setConfirmDeleteItem(item)}>🗑</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className={styles.secondaryBtn} style={{ marginTop: 12 }} onClick={() => setItemModal({ mode: "create", stageId: stage.id })}>
+                + Add Item
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {stageModal && (
+        <FormModal
+          title={stageModal.mode === "create" ? "Add Stage" : "Edit Stage"}
+          fields={stageFields}
+          initialValues={stageModal.mode === "edit" ? { name: stageModal.row.name, description: stageModal.row.description, sequence: stageModal.row.sequence } : { sequence: nextStageSequence }}
+          submitLabel={stageModal.mode === "create" ? "Add Stage" : "Save Changes"}
+          onCancel={() => setStageModal(null)}
+          onSubmit={async (values) => {
+            const payload = { ...values, sequence: Number(values.sequence) };
+            if (stageModal.mode === "create") await submitJson("/api/v1/admin/onboarding-stages", token, "POST", payload);
+            else await submitJson(`/api/v1/admin/onboarding-stages/${stageModal.row.id}`, token, "PATCH", payload);
+            setToast(stageModal.mode === "create" ? "Stage added successfully." : "Stage updated successfully.");
+            setTimeout(() => setToast(""), 3000);
+            setStageModal(null); load();
+          }}
+        />
+      )}
+      {itemModal && (
+        <FormModal
+          title={itemModal.mode === "create" ? "Add Item" : "Edit Item"}
+          fields={itemFields(itemModal.stageId)}
+          initialValues={
+            itemModal.mode === "edit"
+              ? { item_type: itemModal.row.item_type, training_module_id: itemModal.row.training_module_id || "", title: itemModal.row.title, description: itemModal.row.description, sequence: itemModal.row.sequence }
+              : { item_type: "custom_task", sequence: (stages.find((s) => s.id === itemModal.stageId)?.items.length || 0) + 1 }
+          }
+          submitLabel={itemModal.mode === "create" ? "Add Item" : "Save Changes"}
+          onCancel={() => setItemModal(null)}
+          onSubmit={async (values) => {
+            if (values.item_type === "training_module" && !values.training_module_id) throw Object.assign(new Error("Select a Training Module."), { field: "training_module_id" });
+            const payload = { ...values, sequence: Number(values.sequence), training_module_id: values.item_type === "training_module" ? values.training_module_id : undefined };
+            if (itemModal.mode === "create") await submitJson(`/api/v1/admin/onboarding-stages/${itemModal.stageId}/items`, token, "POST", payload);
+            else await submitJson(`/api/v1/admin/onboarding-stage-items/${itemModal.row.id}`, token, "PATCH", payload);
+            setToast(itemModal.mode === "create" ? "Item added successfully." : "Item updated successfully.");
+            setTimeout(() => setToast(""), 3000);
+            setItemModal(null); load();
+          }}
+        />
+      )}
+      {confirmDeleteStage && (
+        <ConfirmDialog
+          title="Delete Stage"
+          message={`Are you sure you want to delete the stage "${confirmDeleteStage.name}"? Its items and any employee progress on them will be removed too.`}
+          busy={busy}
+          onCancel={() => setConfirmDeleteStage(null)}
+          onConfirm={async () => {
+            setBusy(true);
+            try {
+              await submitJson(`/api/v1/admin/onboarding-stages/${confirmDeleteStage.id}`, token, "DELETE");
+              setConfirmDeleteStage(null); load();
+            } finally { setBusy(false); }
+          }}
+        />
+      )}
+      {confirmDeleteItem && (
+        <ConfirmDialog
+          title="Delete Item"
+          message={`Are you sure you want to delete the item "${confirmDeleteItem.title}"?`}
+          busy={busy}
+          onCancel={() => setConfirmDeleteItem(null)}
+          onConfirm={async () => {
+            setBusy(true);
+            try {
+              await submitJson(`/api/v1/admin/onboarding-stage-items/${confirmDeleteItem.id}`, token, "DELETE");
+              setConfirmDeleteItem(null); load();
+            } finally { setBusy(false); }
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -1960,6 +2138,7 @@ export default function AdminConsole({ token, section }: { token: string; sectio
     case "training": return <TrainingPanel token={token} />;
     case "assignments": return <AssignmentsPanel token={token} />;
     case "content": return <ContentSection token={token} />;
+    case "journey": return <OnboardingJourneyPanel token={token} />;
     case "feedback": return <FeedbackPanel token={token} />;
     case "audit": return <AuditPanel token={token} />;
     case "exec": return <ExecPanel token={token} />;

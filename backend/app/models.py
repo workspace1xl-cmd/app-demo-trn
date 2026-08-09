@@ -246,6 +246,41 @@ class OrgPreboardingContent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+# BUILD PROMPT v5 BLOCK B: stage-gated onboarding journey. Mirrors
+# supabase/migrations/20260809050000_block_b_onboarding_journey.sql
+# exactly. See that file's header comment for the item_type reasoning
+# (why 'rules_ack' is deliberately not a valid value yet).
+class OnboardingStage(Base, TimestampMixin):
+    __tablename__ = "onboarding_stages"
+    __table_args__ = (UniqueConstraint("org_id", "sequence"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text, default="")
+    sequence: Mapped[int] = mapped_column(Integer)
+
+
+class OnboardingStageItem(Base, TimestampMixin):
+    __tablename__ = "onboarding_stage_items"
+    __table_args__ = (UniqueConstraint("stage_id", "sequence"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    stage_id: Mapped[str] = mapped_column(ForeignKey("onboarding_stages.id"), index=True)
+    item_type: Mapped[str] = mapped_column(String(30))
+    training_module_id: Mapped[str | None] = mapped_column(ForeignKey("training_modules.id"), nullable=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    sequence: Mapped[int] = mapped_column(Integer)
+
+
+class EmployeeItemProgress(Base):
+    __tablename__ = "employee_item_progress"
+    __table_args__ = (UniqueConstraint("user_id", "item_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    item_id: Mapped[str] = mapped_column(ForeignKey("onboarding_stage_items.id"), index=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
