@@ -81,7 +81,7 @@ type Gamification = { streak_days: number; milestones: Milestone[] };
 type DashboardData = { user: { name: string }; training: { percent: number; completed: number; total: number }; certificates: number; points: number; open_actions: number; readiness: Readiness; gamification?: Gamification };
 type SearchData = { query: string; confidence: number; answer: string; ai_used: boolean; activities: Activity[]; unresolved?: boolean };
 type ModuleResource = { resource_type: string; title: string; kind: string; url: string | null };
-type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
+type TrainingModule = { id: string; sequence: number; code: string; title: string; objective: string; duration_minutes: number; content_type: string; sop_url?: string | null; sop_label?: string | null; progress?: { status: string; percent?: number; progress_percent?: number; best_score?: number | null } | null; resources?: ModuleResource[] };
 
 // BUILD PROMPT v5 BLOCK B: onboarding journey. Fetched separately from the
 // standard DashboardData above — the two are independent screens (the
@@ -92,7 +92,19 @@ type JourneyStage = { id: string; name: string; description: string; sequence: n
 type Journey = { stages: JourneyStage[]; journey_complete: boolean };
 
 // BUILD PROMPT v5 BLOCK D: Rules & Regulations.
-type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; read: boolean };
+type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; sop_url?: string | null; sop_label?: string | null; read: boolean };
+
+// BUILD PROMPT v5 BLOCK E: a plain URL into SOPGalaxy, same "render as a
+// real link only when it looks like one" convention already used for
+// Activity.sop_link.
+function SopLink({ url, label }: { url?: string | null; label?: string | null }) {
+  if (!url || !/^https?:\/\//.test(url)) return null;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12.5, fontWeight: 700, color: "#7058ff" }}>
+      {label?.trim() || "View SOP for this"} ↗
+    </a>
+  );
+}
 
 // Single date format for the whole app. Before this, Certificates showed
 // raw ISO ("2026-08-07"), the admin console showed "07 Aug 2026", and the
@@ -1075,6 +1087,7 @@ export default function WorkingPlatform() {
                     </small>
                     <h3>{m.title}</h3>
                     <p>{m.objective}</p>
+                    {m.sop_url && <div style={{ margin: "2px 0 8px" }}><SopLink url={m.sop_url} label={m.sop_label} /></div>}
                     {m.resources && m.resources.length > 0 && (
                       <div className={styles.moduleResources}>
                         {m.resources.map((resource, index) =>
@@ -1326,6 +1339,7 @@ export default function WorkingPlatform() {
                         {openRuleId === rule.id && (
                           <>
                             <p style={{ color: "#17182f", whiteSpace: "pre-wrap", marginTop: 10 }}>{rule.body}</p>
+                            {rule.sop_url && <div style={{ marginTop: 8 }}><SopLink url={rule.sop_url} label={rule.sop_label} /></div>}
                             <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
                               {!rule.read && rule.version_id && (
                                 <button type="button" className={styles.journeyDoneBtn} disabled={ruleReadBusyId === rule.version_id} onClick={() => markRuleRead(rule.version_id!)}>

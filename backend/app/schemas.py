@@ -59,6 +59,8 @@ class ModuleCreate(BaseModel):
     content: dict = {}
     passing_score: int = Field(default=80, ge=0, le=100)
     refresher_months: int = Field(default=12, ge=0)
+    sop_url: str | None = None
+    sop_label: str | None = None
 
 
 class DepartmentCreate(BaseModel):
@@ -113,6 +115,8 @@ class ModuleUpdate(BaseModel):
     refresher_months: int | None = Field(default=None, ge=0)
     is_mandatory: bool | None = None
     status: str | None = None
+    sop_url: str | None = None
+    sop_label: str | None = None
 
 
 class QuestionCreate(BaseModel):
