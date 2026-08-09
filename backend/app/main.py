@@ -302,6 +302,10 @@ def onboarding_journey(user: User = Depends(current_user), db: Session = Depends
         completed = (item.training_module_id in completed_module_ids) if item.item_type == "training_module" else (item.id in acks)
         items_by_stage.setdefault(item.stage_id, []).append({
             "id": item.id, "item_type": item.item_type, "training_module_id": item.training_module_id,
+            # content_asset always None here — see the model comment on
+            # OnboardingStageItem.content_asset_id (Content Library isn't
+            # mirrored in this stack).
+            "content_asset_id": item.content_asset_id, "content_asset": None,
             "title": item.title, "description": item.description, "sequence": item.sequence,
             "completed": completed, "completed_at": None if item.item_type == "training_module" else (acks[item.id].isoformat() if item.id in acks else None),
         })
@@ -884,7 +888,10 @@ def update_preboarding_content(payload: dict, user: User = Depends(admin_user), 
 # journey. Mirrors the Edge Function's onboarding-stages routes exactly.
 # ---------------------------------------------------------------------------
 def _stage_item_dict(item: OnboardingStageItem) -> dict:
+    # content_asset is always None here — see the model comment on
+    # content_asset_id: Content Library isn't mirrored in this stack.
     return {"id": item.id, "stage_id": item.stage_id, "item_type": item.item_type, "training_module_id": item.training_module_id,
+            "content_asset_id": item.content_asset_id, "content_asset": None,
             "title": item.title, "description": item.description, "sequence": item.sequence}
 
 
@@ -963,7 +970,8 @@ def create_onboarding_stage_item(stage_id: str, payload: dict, user: User = Depe
         raise HTTPException(400, {"detail": "Select a Training Module.", "field": "training_module_id"})
     if db.scalar(select(OnboardingStageItem).where(OnboardingStageItem.stage_id == stage.id, OnboardingStageItem.sequence == sequence)):
         raise HTTPException(409, "An item already exists at that sequence position.")
-    item = OnboardingStageItem(stage_id=stage.id, item_type=item_type, training_module_id=training_module_id,
+    content_asset_id = payload.get("content_asset_id") if item_type == "content_block" else None
+    item = OnboardingStageItem(stage_id=stage.id, item_type=item_type, training_module_id=training_module_id, content_asset_id=content_asset_id or None,
                                 title=title, description=str(payload.get("description") or "").strip(), sequence=sequence)
     db.add(item); db.flush()
     audit(db, user, "onboarding_stage_item.create", "onboarding_stage_item", item.id); db.commit()
@@ -989,6 +997,7 @@ def update_onboarding_stage_item(item_id: str, payload: dict, user: User = Depen
         item.sequence = payload["sequence"]
     if "title" in payload: item.title = str(payload["title"]).strip()
     if "description" in payload: item.description = str(payload["description"]).strip()
+    if "content_asset_id" in payload: item.content_asset_id = payload["content_asset_id"] or None
     audit(db, user, "onboarding_stage_item.update", "onboarding_stage_item", item.id); db.commit()
     return _stage_item_dict(item)
 

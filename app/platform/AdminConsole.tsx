@@ -1537,7 +1537,7 @@ function FeedbackPanel({ token }: { token: string }) {
 // Content library — documents, video tutorials, SOP files and mistake register
 // ---------------------------------------------------------------------------
 
-type ContentAsset = { id: string; kind: string; title: string; description: string | null; file_name: string; mime_type: string; size_bytes: number; status: string; created_at: string };
+type ContentAsset = { id: string; kind: string; title: string; description: string | null; file_name: string; mime_type: string; size_bytes: number; status: string; message_subtype?: string | null; created_at: string };
 type MistakeRow = { id: string; code: string; title: string; description: string; correct_practice: string; category: string; severity: string; status: string; is_seed: boolean };
 
 const CONTENT_KIND_OPTIONS = [
@@ -1547,7 +1547,24 @@ const CONTENT_KIND_OPTIONS = [
   { value: "mistake_register", label: "Mistake Register Sheet" },
   { value: "template", label: "Template" },
   { value: "image", label: "Image" },
+  { value: "onboarding_message", label: "Onboarding Message" },
 ];
+
+// BUILD PROMPT v5 BLOCK C: who an Onboarding Message is from. Required
+// for, and only meaningful on, kind = "onboarding_message" — mirrors the
+// DB check constraint content_assets_message_subtype_matches_kind.
+const MESSAGE_SUBTYPE_OPTIONS = [
+  { value: "welcome", label: "Welcome Message" },
+  { value: "founder", label: "Founder" },
+  { value: "md", label: "Managing Director" },
+  { value: "co_founder", label: "Co-Founder" },
+  { value: "management", label: "Management" },
+  { value: "hr", label: "HR" },
+  { value: "hr_training_video", label: "HR Training Video" },
+];
+function messageSubtypeLabel(value?: string | null) {
+  return MESSAGE_SUBTYPE_OPTIONS.find((o) => o.value === value)?.label || value || "";
+}
 
 function formatBytes(bytes: number) {
   if (!bytes) return "—";
@@ -1561,6 +1578,7 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("document");
+  const [messageSubtype, setMessageSubtype] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState("");
@@ -1571,11 +1589,13 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
     const nextErrors: Record<string, string> = {};
     if (!title.trim()) nextErrors.title = "Title is required.";
     if (!file) nextErrors.file = "Choose a file to upload.";
+    if (kind === "onboarding_message" && !messageSubtype) nextErrors.message_subtype = "Choose who this message is from.";
     if (Object.keys(nextErrors).length) { setErrors(nextErrors); return; }
     setBusy(true); setBanner(""); setErrors({}); setProgress(10);
     try {
       const prepared = await submitJson("/api/v1/admin/content/upload-url", token, "POST", {
         title: title.trim(), description: description.trim() || undefined, kind,
+        message_subtype: kind === "onboarding_message" ? messageSubtype : undefined,
         file_name: file!.name, mime_type: file!.type || "application/octet-stream", size_bytes: file!.size,
       });
       setProgress(45);
@@ -1611,6 +1631,16 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
             {CONTENT_KIND_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </div>
+        {kind === "onboarding_message" && (
+          <div className={styles.field} data-invalid={errors.message_subtype ? "true" : "false"}>
+            <label>Message From<span className={styles.required}>*</span></label>
+            <select value={messageSubtype} onChange={(e) => setMessageSubtype(e.target.value)}>
+              <option value="">Select Message From</option>
+              {MESSAGE_SUBTYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            {errors.message_subtype && <p className={styles.fieldError}>{errors.message_subtype}</p>}
+          </div>
+        )}
         <div className={styles.field} data-invalid={errors.file ? "true" : "false"}>
           <label>File<span className={styles.required}>*</span></label>
           <div className={styles.uploadDrop}>
@@ -1630,11 +1660,43 @@ function UploadModal({ token, onCancel, onUploaded }: { token: string; onCancel:
   );
 }
 
+// Message From is always shown, not conditionally rendered on the Content
+// Type selection — FormModal owns its own field values internally, so this
+// component has no way to react to the in-progress kind selection until
+// submit. Same reasoning as onboarding_stage_items' training_module_id
+// field in OnboardingJourneyPanel below: explain via helpText, validate on
+// submit, let the (also-real) DB constraint be the final backstop.
+function ExternalLinkModal({ token, onCancel, onAdded }: { token: string; onCancel: () => void; onAdded: () => void }) {
+  const fields: FieldDef[] = [
+    { key: "title", label: "Title", type: "text", required: true },
+    { key: "description", label: "Description", type: "textarea" },
+    { key: "kind", label: "Content Type", type: "select", required: true, options: CONTENT_KIND_OPTIONS.filter((o) => o.value !== "mistake_register") },
+    { key: "message_subtype", label: "Message From", type: "select", options: MESSAGE_SUBTYPE_OPTIONS, helpText: "Only used when Content Type is Onboarding Message." },
+    { key: "external_url", label: "Link (YouTube or any URL)", type: "text", required: true, placeholder: "https://www.youtube.com/watch?v=..." },
+  ];
+  return (
+    <FormModal
+      title="Add External Link"
+      fields={fields}
+      initialValues={{ kind: "video" }}
+      submitLabel="Add Link"
+      onCancel={onCancel}
+      onSubmit={async (values) => {
+        if (values.kind === "onboarding_message" && !values.message_subtype) throw Object.assign(new Error("Choose who this message is from."), { field: "message_subtype" });
+        if (values.kind !== "onboarding_message") values.message_subtype = "";
+        await submitJson("/api/v1/admin/content/external", token, "POST", values);
+        onAdded();
+      }}
+    />
+  );
+}
+
 function ContentLibraryPanel({ token }: { token: string }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [kindFilter, setKindFilter] = useState("");
   const list = usePagedList<ContentAsset>(token, (page, size) => `/api/v1/admin/content?page=${page}&page_size=${size}${kindFilter ? `&kind=${kindFilter}` : ""}`, reloadKey, kindFilter);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [linkOpen, setLinkOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ContentAsset | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState("");
@@ -1656,13 +1718,22 @@ function ContentLibraryPanel({ token }: { token: string }) {
           <option value="">All content</option>
           {CONTENT_KIND_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
+        <button type="button" className={styles.secondaryBtn} onClick={() => setLinkOpen(true)}>+ Add External Link</button>
         <button type="button" className={styles.primaryBtn} onClick={() => setUploadOpen(true)}>+ Upload Document or Video</button>
       </div>
       <Feedback error={list.error || error} toast={toast} />
       <DataTable
         columns={[
-          { key: "title", label: "Title", render: (row) => (<><b>{row.title}</b><small>{row.file_name} · {formatBytes(row.size_bytes)}</small></>) },
-          { key: "kind", label: "Type", render: (row) => <StatusBadge status={row.kind} /> },
+          { key: "title", label: "Title", render: (row) => (<><b>{row.title}</b><small>{row.file_name ? `${row.file_name} · ${formatBytes(row.size_bytes)}` : "External link"}</small></>) },
+          {
+            key: "kind",
+            label: "Type",
+            render: (row) => row.kind === "onboarding_message" ? (
+              <><StatusBadge status={row.kind} /><small style={{ display: "block", marginTop: 4 }}>From: {messageSubtypeLabel(row.message_subtype)}</small></>
+            ) : (
+              <StatusBadge status={row.kind} />
+            ),
+          },
           { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
           { key: "created_at", label: "Uploaded", render: (row) => formatDate(row.created_at) },
         ]}
@@ -1682,6 +1753,13 @@ function ContentLibraryPanel({ token }: { token: string }) {
           token={token}
           onCancel={() => setUploadOpen(false)}
           onUploaded={() => { setUploadOpen(false); setReloadKey((k) => k + 1); setToast("File uploaded successfully."); setTimeout(() => setToast(""), 3000); }}
+        />
+      )}
+      {linkOpen && (
+        <ExternalLinkModal
+          token={token}
+          onCancel={() => setLinkOpen(false)}
+          onAdded={() => { setLinkOpen(false); setReloadKey((k) => k + 1); setToast("Link added successfully."); setTimeout(() => setToast(""), 3000); }}
         />
       )}
       {confirmDelete && (
@@ -1954,7 +2032,7 @@ function ExecPanel({ token }: { token: string }) {
 // is meaningless without its parent stage's context.
 // ---------------------------------------------------------------------------
 
-type JourneyAdminItem = { id: string; stage_id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; title: string; description: string; sequence: number };
+type JourneyAdminItem = { id: string; stage_id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; content_asset_id: string | null; content_asset: { title: string; kind: string; message_subtype: string | null } | null; title: string; description: string; sequence: number };
 type JourneyAdminStage = { id: string; name: string; description: string; sequence: number; items: JourneyAdminItem[] };
 
 function OnboardingJourneyPanel({ token }: { token: string }) {
@@ -1968,6 +2046,16 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
   const [confirmDeleteItem, setConfirmDeleteItem] = useState<JourneyAdminItem | null>(null);
   const [busy, setBusy] = useState(false);
   const trainingModules = useLookup<{ id: string; title: string }>(token, "/api/v1/training/modules");
+  // BUILD PROMPT v5 BLOCK C: only Onboarding Message assets are offered
+  // here — /api/v1/admin/content returns a Paged<T> (not a bare array like
+  // useLookup expects), so this is its own small fetch rather than reusing
+  // that hook.
+  const [messageAssets, setMessageAssets] = useState<{ id: string; title: string; message_subtype: string | null }[]>([]);
+  useEffect(() => {
+    request<Paged<{ id: string; title: string; message_subtype: string | null }>>("/api/v1/admin/content?kind=onboarding_message&page_size=100", token)
+      .then((res) => setMessageAssets(res.items))
+      .catch(() => {});
+  }, [token]);
 
   function load() {
     request<JourneyAdminStage[]>("/api/v1/admin/onboarding-stages", token)
@@ -1994,6 +2082,7 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
         { value: "content_block", label: "Content Block (employee marks it done)" },
       ] },
       { key: "training_module_id", label: "Training Module", type: "select", options: trainingModules.map((m) => ({ value: m.id, label: m.title })), helpText: "Only used when Item Type is Training Module." },
+      { key: "content_asset_id", label: "Onboarding Message", type: "select", options: messageAssets.map((m) => ({ value: m.id, label: `${m.title} (${messageSubtypeLabel(m.message_subtype)})` })), helpText: "Only used when Item Type is Content Block — leave blank for a plain acknowledge-this-title item." },
       { key: "title", label: "Title", type: "text", required: true },
       { key: "description", label: "Description", type: "textarea" },
       { key: "sequence", label: "Sequence", type: "number", required: true, helpText: `Order this item appears in the stage — next free slot is ${nextItemSequence}.` },
@@ -2034,6 +2123,7 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
                       <b style={{ fontSize: 13 }}>{item.title}</b>
                       <small style={{ display: "block", color: "#8b8f9e", fontSize: 12 }}>
                         {item.item_type === "training_module" ? "Training Module (auto)" : item.item_type === "custom_task" ? "Custom Task" : "Content Block"}
+                        {item.content_asset ? ` · Linked: ${item.content_asset.title}` : ""}
                         {item.description ? ` · ${item.description}` : ""}
                       </small>
                     </div>
@@ -2075,14 +2165,18 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
           fields={itemFields(itemModal.stageId)}
           initialValues={
             itemModal.mode === "edit"
-              ? { item_type: itemModal.row.item_type, training_module_id: itemModal.row.training_module_id || "", title: itemModal.row.title, description: itemModal.row.description, sequence: itemModal.row.sequence }
+              ? { item_type: itemModal.row.item_type, training_module_id: itemModal.row.training_module_id || "", content_asset_id: itemModal.row.content_asset_id || "", title: itemModal.row.title, description: itemModal.row.description, sequence: itemModal.row.sequence }
               : { item_type: "custom_task", sequence: (stages.find((s) => s.id === itemModal.stageId)?.items.length || 0) + 1 }
           }
           submitLabel={itemModal.mode === "create" ? "Add Item" : "Save Changes"}
           onCancel={() => setItemModal(null)}
           onSubmit={async (values) => {
             if (values.item_type === "training_module" && !values.training_module_id) throw Object.assign(new Error("Select a Training Module."), { field: "training_module_id" });
-            const payload = { ...values, sequence: Number(values.sequence), training_module_id: values.item_type === "training_module" ? values.training_module_id : undefined };
+            const payload = {
+              ...values, sequence: Number(values.sequence),
+              training_module_id: values.item_type === "training_module" ? values.training_module_id : undefined,
+              content_asset_id: values.item_type === "content_block" ? values.content_asset_id || undefined : undefined,
+            };
             if (itemModal.mode === "create") await submitJson(`/api/v1/admin/onboarding-stages/${itemModal.stageId}/items`, token, "POST", payload);
             else await submitJson(`/api/v1/admin/onboarding-stage-items/${itemModal.row.id}`, token, "PATCH", payload);
             setToast(itemModal.mode === "create" ? "Item added successfully." : "Item updated successfully.");
