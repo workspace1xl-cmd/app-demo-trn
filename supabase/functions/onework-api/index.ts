@@ -61,6 +61,22 @@ async function audit(user: any, action: string, entityType: string, entityId?: s
   await supabase.from("audit_events").insert({ org_id: user.org_id, actor_user_id: user.id, action, entity_type: entityType, entity_id: entityId || null, details });
 }
 
+// BUILD PROMPT v5 BLOCK D: the actual gating chain — "can't pass a quiz
+// without 100% required reading". Checked at attempt time, not just
+// display time, so this is a real server-side gate, not a UI hint. Returns
+// the titles of whatever's unread (empty array = clear to attempt).
+async function unreadMandatoryRuleTitles(user: { id: string; org_id: string; department_id: string | null }): Promise<string[]> {
+  const { data: rules } = await supabase.from("rules")
+    .select("title,published_version_id")
+    .eq("org_id", user.org_id).eq("status", "active").eq("is_mandatory", true)
+    .or(`department_id.is.null,department_id.eq.${user.department_id || "00000000-0000-0000-0000-000000000000"}`);
+  const withVersion = (rules || []).filter((r) => r.published_version_id);
+  if (!withVersion.length) return [];
+  const { data: reads } = await supabase.from("rule_reads").select("rule_version_id").eq("user_id", user.id);
+  const readVersionIds = new Set((reads || []).map((r) => r.rule_version_id));
+  return withVersion.filter((r) => !readVersionIds.has(r.published_version_id)).map((r) => r.title);
+}
+
 function forbidUnlessAdmin(isAdmin: boolean) {
   return isAdmin ? null : json({ detail: "Administrator permission required." }, 403);
 }
@@ -301,12 +317,19 @@ Deno.serve(async (req) => {
       if (error) throw error;
       const ackByItem = new Map((itemProgress || []).map((p) => [p.item_id, p.completed_at]));
       const completedModuleIds = new Set((enrollments || []).filter((e) => e.status === "completed").map((e) => e.module_id));
+      // BUILD PROMPT v5 BLOCK D: rules_ack completion is DERIVED, like
+      // training_module — "done" means every mandatory rule that applies
+      // to this employee is read, not a manual click. Only computed when
+      // a rules_ack item actually exists, to avoid the extra query on
+      // every journey load for orgs that don't use it.
+      const hasRulesAckItem = (items || []).some((i: any) => i.item_type === "rules_ack");
+      const rulesAckComplete = hasRulesAckItem ? (await unreadMandatoryRuleTitles(user)).length === 0 : true;
       const itemsByStage = new Map<string, any[]>();
       for (const raw of items || []) {
         const { onboarding_stages, content_assets, ...item } = raw as any;
-        const completed = item.item_type === "training_module" ? completedModuleIds.has(item.training_module_id) : ackByItem.has(item.id);
+        const completed = item.item_type === "training_module" ? completedModuleIds.has(item.training_module_id) : item.item_type === "rules_ack" ? rulesAckComplete : ackByItem.has(item.id);
         if (!itemsByStage.has(item.stage_id)) itemsByStage.set(item.stage_id, []);
-        itemsByStage.get(item.stage_id)!.push({ ...item, content_asset: content_assets || null, completed, completed_at: item.item_type === "training_module" ? null : ackByItem.get(item.id) || null });
+        itemsByStage.get(item.stage_id)!.push({ ...item, content_asset: content_assets || null, completed, completed_at: item.item_type === "training_module" || item.item_type === "rules_ack" ? null : ackByItem.get(item.id) || null });
       }
       let priorComplete = true;
       const shaped = (stages || []).map((s) => {
@@ -324,6 +347,7 @@ Deno.serve(async (req) => {
       const { data: item } = await supabase.from("onboarding_stage_items").select("id,item_type,onboarding_stages!inner(org_id)").eq("id", journeyAckMatch[1]).eq("onboarding_stages.org_id", user.org_id).maybeSingle();
       if (!item) return json({ detail: "This onboarding item couldn't be found." }, 404);
       if (item.item_type === "training_module") return json({ detail: "This item completes automatically once you finish the training module." }, 400);
+      if (item.item_type === "rules_ack") return json({ detail: "This item completes automatically once you've read every mandatory rule that applies to you." }, 400);
       // Idempotent: re-clicking "mark done" after it's already recorded is
       // a no-op, not an error — same pattern as Block A's acknowledge route.
       const { error } = await supabase.from("employee_item_progress").upsert({ user_id: user.id, item_id: item.id }, { onConflict: "user_id,item_id", ignoreDuplicates: true });
@@ -534,6 +558,10 @@ Deno.serve(async (req) => {
       const [{ data: module }, { data: questions }] = await Promise.all([supabase.from("training_modules").select("*").eq("id", attemptMatch[1]).eq("org_id", user.org_id).maybeSingle(), supabase.from("quiz_questions").select("correct_index,explanation").eq("org_id", user.org_id).eq("module_id", attemptMatch[1]).order("created_at")]);
       if (!module) return json({ detail: "Module not found." }, 404);
       if (!questions?.length || answers?.length !== questions.length) return json({ detail: "Submit one answer for every question." }, 400);
+      // BUILD PROMPT v5 BLOCK D: gating chain — you cannot even attempt a
+      // quiz while a mandatory rule that applies to you is unread.
+      const unread = await unreadMandatoryRuleTitles(user);
+      if (unread.length) return json({ detail: `Read all mandatory rules before attempting this quiz. Still unread: ${unread.join(", ")}.`, unread_rules: unread }, 403);
       const correct = questions.filter((question, index) => question.correct_index === answers[index]).length, score = Math.round(correct / questions.length * 100), passed = score >= module.passing_score;
       await supabase.from("quiz_attempts").insert({ org_id: user.org_id, user_id: user.id, module_id: module.id, score, passed, answers });
       const { data: enrollment } = await supabase.from("enrollments").select("id,best_score").eq("org_id", user.org_id).eq("user_id", user.id).eq("module_id", module.id).maybeSingle();
@@ -849,7 +877,7 @@ Deno.serve(async (req) => {
       const { data: stage } = await supabase.from("onboarding_stages").select("id").eq("id", stageItemsMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!stage) return json({ detail: "Stage not found." }, 404);
       const body = await req.json();
-      if (!["training_module", "content_block", "custom_task"].includes(body.item_type)) return fieldError("item_type", "Choose a valid item type.");
+      if (!["training_module", "content_block", "custom_task", "rules_ack"].includes(body.item_type)) return fieldError("item_type", "Choose a valid item type.");
       if (!body.title?.trim()) return fieldError("title", "Title is required.");
       if (!Number.isInteger(body.sequence)) return fieldError("sequence", "Sequence is required.");
       if (body.item_type === "training_module" && !body.training_module_id) return fieldError("training_module_id", "Select a Training Module.");
@@ -1293,6 +1321,135 @@ Deno.serve(async (req) => {
       const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
       const { data: removed, error } = await supabase.rpc("replace_seed_mistake_register", { p_org_id: user.org_id });
       if (error) throw error; await audit(user, "mistake.replace_seed", "mistake_register", undefined, { removed }); return json({ removed_seed_rows: removed || 0 });
+    }
+
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK D: Rules & Regulations — admin side. Rules are
+    // versioned: creating a rule creates version 1 and publishes it in the
+    // same call (an unpublished rule is pointless — nobody can be gated on
+    // it); editing content always creates a NEW version rather than
+    // mutating the old one, so read-tracking never silently misattributes
+    // "read v1" as "read v2".
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/admin/rules" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const [{ data: rules, error }, { data: departments }, { data: versions }] = await Promise.all([
+        supabase.from("rules").select("id,department_id,title,category,is_mandatory,status,published_version_id,created_at").eq("org_id", user.org_id).order("created_at", { ascending: false }),
+        supabase.from("departments").select("id,name").eq("org_id", user.org_id),
+        supabase.from("rule_versions").select("id,rule_id,version,body,created_at").order("version", { ascending: false }),
+      ]);
+      if (error) throw error;
+      const deptById = new Map((departments || []).map((d) => [d.id, d.name]));
+      const versionById = new Map((versions || []).map((v) => [v.id, v]));
+      return json((rules || []).map((r) => ({ ...r, department_name: r.department_id ? deptById.get(r.department_id) || null : null, published_version: r.published_version_id ? versionById.get(r.published_version_id) || null : null })));
+    }
+    if (path === "/api/v1/admin/rules" && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json();
+      if (!body.title?.trim()) return fieldError("title", "Title is required.");
+      if (!body.body?.trim()) return fieldError("body", "Rule content is required.");
+      const { data: rule, error } = await supabase.from("rules").insert({ org_id: user.org_id, department_id: body.department_id || null, title: body.title.trim(), category: body.category?.trim() || "general", is_mandatory: body.is_mandatory !== false, created_by: user.id }).select().single();
+      if (error) throw error;
+      const { data: version, error: vError } = await supabase.from("rule_versions").insert({ rule_id: rule.id, version: 1, body: body.body.trim(), created_by: user.id }).select().single();
+      if (vError) throw vError;
+      await supabase.from("rules").update({ published_version_id: version.id }).eq("id", rule.id);
+      await audit(user, "rule.create", "rule", rule.id, { title: rule.title }); return json({ ...rule, published_version_id: version.id }, 201);
+    }
+    const ruleMatch = path.match(/^\/api\/v1\/admin\/rules\/([^/]+)$/);
+    if (ruleMatch && req.method === "PATCH") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const body = await req.json(); const patch: Record<string, unknown> = {};
+      if (body.title !== undefined) patch.title = String(body.title).trim();
+      if (body.category !== undefined) patch.category = String(body.category).trim();
+      if (body.department_id !== undefined) patch.department_id = body.department_id || null;
+      if (body.is_mandatory !== undefined) patch.is_mandatory = Boolean(body.is_mandatory);
+      if (body.status !== undefined) patch.status = body.status;
+      const { data, error } = await supabase.from("rules").update(patch).eq("id", ruleMatch[1]).eq("org_id", user.org_id).select().maybeSingle();
+      if (error) throw error; if (!data) return json({ detail: "Rule not found." }, 404);
+      await audit(user, "rule.update", "rule", data.id); return json(data);
+    }
+    // A new version is a distinct action from editing metadata — it's the
+    // one that actually invalidates everyone's read status, so it gets its
+    // own explicit route rather than being folded into PATCH.
+    const ruleVersionMatch = path.match(/^\/api\/v1\/admin\/rules\/([^/]+)\/versions$/);
+    if (ruleVersionMatch && req.method === "POST") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data: rule } = await supabase.from("rules").select("id").eq("id", ruleVersionMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      if (!rule) return json({ detail: "Rule not found." }, 404);
+      const body = await req.json();
+      if (!body.body?.trim()) return fieldError("body", "Rule content is required.");
+      const { data: latest } = await supabase.from("rule_versions").select("version").eq("rule_id", rule.id).order("version", { ascending: false }).limit(1).maybeSingle();
+      const nextVersion = (latest?.version || 0) + 1;
+      const { data: version, error } = await supabase.from("rule_versions").insert({ rule_id: rule.id, version: nextVersion, body: body.body.trim(), created_by: user.id }).select().single();
+      if (error) throw error;
+      await supabase.from("rules").update({ published_version_id: version.id }).eq("id", rule.id);
+      await audit(user, "rule.new_version", "rule", rule.id, { version: nextVersion }); return json(version, 201);
+    }
+    if (path === "/api/v1/admin/rule-suggestions" && req.method === "GET") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const status = rawUrl.searchParams.get("status");
+      let request = supabase.from("rule_change_suggestions").select("id,rule_id,suggested_by,suggestion_text,status,rejection_reason,target_implementation_date,reviewed_at,created_at,rules!inner(org_id,title),app_users!rule_change_suggestions_suggested_by_fkey(full_name)").eq("rules.org_id", user.org_id);
+      if (status) request = request.eq("status", status);
+      const { data, error } = await request.order("created_at", { ascending: false });
+      if (error) throw error;
+      return json((data || []).map((s: any) => ({ ...s, rule_title: s.rules?.title, suggested_by_name: s.app_users?.full_name, rules: undefined, app_users: undefined })));
+    }
+    const suggestionMatch = path.match(/^\/api\/v1\/admin\/rule-suggestions\/([^/]+)$/);
+    if (suggestionMatch && req.method === "PATCH") {
+      const deny = forbidUnlessAdmin(isAdmin); if (deny) return deny;
+      const { data: existing } = await supabase.from("rule_change_suggestions").select("id,rule_id,rules!inner(org_id)").eq("id", suggestionMatch[1]).eq("rules.org_id", user.org_id).maybeSingle();
+      if (!existing) return json({ detail: "Suggestion not found." }, 404);
+      const body = await req.json();
+      if (!["under_review", "accepted", "rejected", "implementation_pending", "implemented"].includes(body.status)) return fieldError("status", "Choose a valid status.");
+      if (body.status === "rejected" && !body.rejection_reason?.trim()) return fieldError("rejection_reason", "A reason is required when rejecting a suggestion.");
+      const patch: Record<string, unknown> = { status: body.status, reviewed_by: user.id, reviewed_at: new Date().toISOString() };
+      if (body.status === "rejected") patch.rejection_reason = body.rejection_reason.trim();
+      if (body.target_implementation_date !== undefined) patch.target_implementation_date = body.target_implementation_date || null;
+      const { data, error } = await supabase.from("rule_change_suggestions").update(patch).eq("id", suggestionMatch[1]).select().single();
+      if (error) throw error;
+      await audit(user, "rule_suggestion.review", "rule_change_suggestion", data.id, { status: data.status }); return json(data);
+    }
+
+    // -------------------------------------------------------------------
+    // BUILD PROMPT v5 BLOCK D: Rules & Regulations — employee side.
+    // Visibility is department-scoped: a rule with department_id = null
+    // applies org-wide; otherwise only to that department.
+    // -------------------------------------------------------------------
+    if (path === "/api/v1/rules" && req.method === "GET") {
+      const [{ data: rules, error }, { data: reads }] = await Promise.all([
+        supabase.from("rules").select("id,department_id,title,category,is_mandatory,published_version_id,rule_versions!rules_published_version_id_fkey(id,version,body,created_at)").eq("org_id", user.org_id).eq("status", "active").or(`department_id.is.null,department_id.eq.${user.department_id || "00000000-0000-0000-0000-000000000000"}`),
+        supabase.from("rule_reads").select("rule_version_id").eq("user_id", user.id),
+      ]);
+      if (error) throw error;
+      const readVersionIds = new Set((reads || []).map((r) => r.rule_version_id));
+      return json((rules || []).map((r: any) => ({
+        id: r.id, title: r.title, category: r.category, is_mandatory: r.is_mandatory,
+        version_id: r.rule_versions?.id || null, version: r.rule_versions?.version || null, body: r.rule_versions?.body || null,
+        read: r.rule_versions?.id ? readVersionIds.has(r.rule_versions.id) : false,
+      })));
+    }
+    const ruleReadMatch = path.match(/^\/api\/v1\/rules\/versions\/([^/]+)\/read$/);
+    if (ruleReadMatch && req.method === "POST") {
+      // Idempotent — same pattern as every other "mark as done" route in
+      // this app (Block A's acknowledge, Block B's item-complete).
+      const { error } = await supabase.from("rule_reads").upsert({ rule_version_id: ruleReadMatch[1], user_id: user.id }, { onConflict: "rule_version_id,user_id", ignoreDuplicates: true });
+      if (error) throw error;
+      return json({ ok: true });
+    }
+    const ruleSuggestMatch = path.match(/^\/api\/v1\/rules\/([^/]+)\/suggest$/);
+    if (ruleSuggestMatch && req.method === "POST") {
+      const { data: rule } = await supabase.from("rules").select("id").eq("id", ruleSuggestMatch[1]).eq("org_id", user.org_id).maybeSingle();
+      if (!rule) return json({ detail: "Rule not found." }, 404);
+      const body = await req.json();
+      if (!body.suggestion_text?.trim()) return fieldError("suggestion_text", "Describe your suggested change.");
+      const { data, error } = await supabase.from("rule_change_suggestions").insert({ rule_id: rule.id, suggested_by: user.id, suggestion_text: body.suggestion_text.trim() }).select().single();
+      if (error) throw error;
+      return json(data, 201);
+    }
+    if (path === "/api/v1/rules/my-suggestions" && req.method === "GET") {
+      const { data, error } = await supabase.from("rule_change_suggestions").select("id,rule_id,suggestion_text,status,rejection_reason,target_implementation_date,created_at,rules(title)").eq("suggested_by", user.id).order("created_at", { ascending: false });
+      if (error) throw error;
+      return json((data || []).map((s: any) => ({ ...s, rule_title: s.rules?.title, rules: undefined })));
     }
 
     // -------------------------------------------------------------------

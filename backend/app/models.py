@@ -288,6 +288,58 @@ class EmployeeItemProgress(Base):
     completed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+# BUILD PROMPT v5 BLOCK D: mirrors
+# supabase/migrations/20260809070000_block_d_rules_and_regulations.sql.
+# See that file's header comment for the versioning/gating reasoning.
+# Cross-field validation (rejected requires rejection_reason, etc.) is
+# enforced in the route handlers below, matching every other model in
+# this file — none of them use a DB-level CheckConstraint either.
+class Rule(Base, TimestampMixin):
+    __tablename__ = "rules"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
+    title: Mapped[str] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(60), default="general")
+    is_mandatory: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    published_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class RuleVersion(Base):
+    __tablename__ = "rule_versions"
+    __table_args__ = (UniqueConstraint("rule_id", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    rule_id: Mapped[str] = mapped_column(ForeignKey("rules.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class RuleRead(Base):
+    __tablename__ = "rule_reads"
+    __table_args__ = (UniqueConstraint("rule_version_id", "user_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    rule_version_id: Mapped[str] = mapped_column(ForeignKey("rule_versions.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    read_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class RuleChangeSuggestion(Base, TimestampMixin):
+    __tablename__ = "rule_change_suggestions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    rule_id: Mapped[str] = mapped_column(ForeignKey("rules.id"), index=True)
+    suggested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    suggestion_text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="submitted")
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_implementation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

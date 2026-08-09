@@ -29,9 +29,10 @@ type View =
   | "matrix"
   | "graph"
   | "certificates"
+  | "rules"
   | "manager"
   | "admin";
-const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "graph", "certificates", "manager", "admin"];
+const VIEW_IDS: View[] = ["dashboard", "search", "training", "matrix", "graph", "certificates", "rules", "manager", "admin"];
 export type AdminSection =
   | "overview"
   | "employees"
@@ -42,10 +43,11 @@ export type AdminSection =
   | "assignments"
   | "content"
   | "journey"
+  | "rules"
   | "feedback"
   | "audit"
   | "exec";
-const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "candidates", "matrix", "training", "assignments", "content", "journey", "feedback", "audit", "exec"];
+const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "candidates", "matrix", "training", "assignments", "content", "journey", "rules", "feedback", "audit", "exec"];
 // Ten flat tabs read as a wall of text — grouped here into 5 clusters
 // (icons + labels, current-section highlighted, sized to the "5-8
 // top-level items" guidance) purely as a navigation reorganisation.
@@ -56,7 +58,7 @@ const ADMIN_GROUPS: { key: string; label: string; icon: string; sections: [Admin
   { key: "people", label: "People", icon: "◍", sections: [["employees", "Employees"], ["departments", "Departments"], ["candidates", "Candidates"]] },
   { key: "learning", label: "Learning", icon: "◎", sections: [["training", "Training & Quiz Builder"], ["assignments", "Assignments"], ["content", "Content Library"], ["journey", "Onboarding Journey"]] },
   { key: "ownership", label: "Ownership", icon: "⬡", sections: [["matrix", "Responsibility Matrix"]] },
-  { key: "governance", label: "Governance", icon: "◉", sections: [["feedback", "Feedback Queue"], ["audit", "Audit Log"]] },
+  { key: "governance", label: "Governance", icon: "◉", sections: [["rules", "Rules & Regulations"], ["feedback", "Feedback Queue"], ["audit", "Audit Log"]] },
 ];
 function adminGroupFor(section: AdminSection) {
   return ADMIN_GROUPS.find((g) => g.sections.some(([id]) => id === section)) || ADMIN_GROUPS[0];
@@ -85,9 +87,12 @@ type TrainingModule = { id: string; sequence: number; code: string; title: strin
 // standard DashboardData above — the two are independent screens (the
 // journey replaces the dashboard's hero while incomplete, then steps aside
 // permanently once complete), not one payload with two shapes.
-type JourneyItem = { id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; content_asset_id: string | null; content_asset: { title: string; kind: string; message_subtype: string | null; external_url: string | null } | null; title: string; description: string; sequence: number; completed: boolean; completed_at: string | null };
+type JourneyItem = { id: string; item_type: "training_module" | "content_block" | "custom_task" | "rules_ack"; training_module_id: string | null; content_asset_id: string | null; content_asset: { title: string; kind: string; message_subtype: string | null; external_url: string | null } | null; title: string; description: string; sequence: number; completed: boolean; completed_at: string | null };
 type JourneyStage = { id: string; name: string; description: string; sequence: number; status: "completed" | "available" | "locked"; items: JourneyItem[] };
 type Journey = { stages: JourneyStage[]; journey_complete: boolean };
+
+// BUILD PROMPT v5 BLOCK D: Rules & Regulations.
+type MyRule = { id: string; title: string; category: string; is_mandatory: boolean; version_id: string | null; version: number | null; body: string | null; read: boolean };
 
 // Single date format for the whole app. Before this, Certificates showed
 // raw ISO ("2026-08-07"), the admin console showed "07 Aug 2026", and the
@@ -148,7 +153,7 @@ type ManagerMember = { id: string; name: string; email: string; department: stri
 // valid org state while manager_id assignment is still rolling out — from
 // a loading/error state.
 type ManagerData = { departments: { id: string; name: string }[]; team_readiness: Readiness; members: ManagerMember[]; overdue_total: number; activities: Activity[]; has_reports: boolean };
-type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | AdminData | ManagerData | null;
+type PlatformData = DashboardData | SearchData | TrainingModule[] | Activity[] | Certificate[] | MyRule[] | AdminData | ManagerData | null;
 
 export async function request<T = PlatformData>(
   path: string,
@@ -410,6 +415,7 @@ export default function WorkingPlatform() {
       matrix: "/api/v1/activities",
       graph: "/api/v1/activities",
       certificates: "/api/v1/certificates",
+      rules: "/api/v1/rules",
       manager: "/api/v1/manager/dashboard",
       admin: "/api/v1/admin/analytics",
     };
@@ -447,6 +453,42 @@ export default function WorkingPlatform() {
       setError(e instanceof Error ? e.message : "Could not record that as done.");
     } finally {
       setJourneyBusyId(null);
+    }
+  }
+
+  // BUILD PROMPT v5 BLOCK D
+  const [openRuleId, setOpenRuleId] = useState<string | null>(null);
+  const [ruleReadBusyId, setRuleReadBusyId] = useState<string | null>(null);
+  const [suggestRuleId, setSuggestRuleId] = useState<string | null>(null);
+  const [suggestText, setSuggestText] = useState("");
+  const [suggestBusy, setSuggestBusy] = useState(false);
+  const [suggestToast, setSuggestToast] = useState("");
+
+  async function markRuleRead(versionId: string) {
+    if (!session) return;
+    setRuleReadBusyId(versionId);
+    try {
+      await request(`/api/v1/rules/versions/${versionId}/read`, session.access_token, { method: "POST" });
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not record that as read.");
+    } finally {
+      setRuleReadBusyId(null);
+    }
+  }
+
+  async function submitRuleSuggestion(ruleId: string) {
+    if (!session || !suggestText.trim()) return;
+    setSuggestBusy(true);
+    try {
+      await request(`/api/v1/rules/${ruleId}/suggest`, session.access_token, { method: "POST", body: JSON.stringify({ suggestion_text: suggestText.trim() }) });
+      setSuggestToast("Your suggestion has been submitted for review.");
+      setTimeout(() => setSuggestToast(""), 4000);
+      setSuggestRuleId(null); setSuggestText("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not submit your suggestion.");
+    } finally {
+      setSuggestBusy(false);
     }
   }
 
@@ -673,6 +715,7 @@ export default function WorkingPlatform() {
     ["matrix", "◎", "Who does what"],
     ["graph", "⬡", "Responsibility graph"],
     ["certificates", "◇", "Certificates"],
+    ["rules", "▦", "Rules & Regulations"],
     ...(session.user.role === "manager" || session.user.role === "admin"
       ? [["manager", "◫", "My team"] as [View, string, string]]
       : []),
@@ -689,6 +732,7 @@ export default function WorkingPlatform() {
   const matrixData = view === "matrix" && Array.isArray(data) ? data as Activity[] : null;
   const fullGraphData = view === "graph" && Array.isArray(data) ? data as Activity[] : null;
   const certificateData = view === "certificates" && Array.isArray(data) ? data as Certificate[] : null;
+  const rulesData = view === "rules" && Array.isArray(data) ? data as MyRule[] : null;
   const adminData = view === "admin" ? data as AdminData | null : null;
   const managerData =
     view === "manager" && data && !Array.isArray(data) && "members" in data ? (data as ManagerData) : null;
@@ -867,8 +911,13 @@ export default function WorkingPlatform() {
                                   Go to My learning →
                                 </button>
                               )}
+                              {item.item_type === "rules_ack" && !item.completed && (
+                                <button type="button" className={styles.journeyLinkBtn} onClick={() => goToView("rules")}>
+                                  Go to Rules & Regulations →
+                                </button>
+                              )}
                             </div>
-                            {item.item_type !== "training_module" && !item.completed && (
+                            {item.item_type !== "training_module" && item.item_type !== "rules_ack" && !item.completed && (
                               <button
                                 type="button"
                                 className={styles.journeyDoneBtn}
@@ -1252,6 +1301,68 @@ export default function WorkingPlatform() {
                   No records found. Certificates are issued automatically when you pass a module assessment.
                 </div>
               )}
+            </div>
+          )}
+          {/* BUILD PROMPT v5 BLOCK D: Rules & Regulations. */}
+          {rulesData && (
+            <div className={styles.journeyShell}>
+              {suggestToast && <div className={styles.toast}>{suggestToast}</div>}
+              {rulesData.length === 0 && (
+                <div className={styles.noRecords}>No records found. No rules apply to you yet.</div>
+              )}
+              <ul className={styles.journeyStages} style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {rulesData.map((rule) => (
+                  <li key={rule.id} className={styles.journeyStage} data-status={rule.read ? "completed" : "available"}>
+                    <div className={styles.journeyStageHead}>
+                      <span className={styles.journeyStageMark}>{rule.read ? "✓" : "!"}</span>
+                      <div style={{ flex: 1 }}>
+                        <h3>
+                          {rule.title}
+                          {rule.is_mandatory && (
+                            <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: "#b8860b", background: "#fff6e0", padding: "3px 9px", borderRadius: 20 }}>Mandatory</span>
+                          )}
+                        </h3>
+                        <p>{rule.category} · Version {rule.version}</p>
+                        {openRuleId === rule.id && (
+                          <>
+                            <p style={{ color: "#17182f", whiteSpace: "pre-wrap", marginTop: 10 }}>{rule.body}</p>
+                            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+                              {!rule.read && rule.version_id && (
+                                <button type="button" className={styles.journeyDoneBtn} disabled={ruleReadBusyId === rule.version_id} onClick={() => markRuleRead(rule.version_id!)}>
+                                  {ruleReadBusyId === rule.version_id ? "Saving…" : "I've read this"}
+                                </button>
+                              )}
+                              <button type="button" className={styles.secondaryBtn} onClick={() => { setSuggestRuleId(rule.id); setSuggestText(""); }}>
+                                Suggest a change
+                              </button>
+                            </div>
+                            {suggestRuleId === rule.id && (
+                              <div style={{ marginTop: 12 }}>
+                                <textarea
+                                  value={suggestText}
+                                  onChange={(e) => setSuggestText(e.target.value)}
+                                  placeholder="Describe your suggested change"
+                                  rows={3}
+                                  style={{ width: "100%", border: "1px solid #dfe0e8", borderRadius: 10, padding: "10px 13px", fontFamily: "inherit", fontSize: 14 }}
+                                />
+                                <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+                                  <button type="button" className={styles.secondaryBtn} onClick={() => setSuggestRuleId(null)}>Cancel</button>
+                                  <button type="button" className={styles.primaryBtn} disabled={suggestBusy || !suggestText.trim()} onClick={() => submitRuleSuggestion(rule.id)}>
+                                    {suggestBusy ? "Submitting…" : "Submit Suggestion"}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      <button type="button" className={styles.journeyLinkBtn} onClick={() => setOpenRuleId((id) => (id === rule.id ? null : rule.id))}>
+                        {openRuleId === rule.id ? "Collapse" : "View →"}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
           {view === "manager" && managerData && (

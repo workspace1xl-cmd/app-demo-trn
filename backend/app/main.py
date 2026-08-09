@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import Base, SessionLocal, engine, get_db
 from .deps import admin_user, current_user
-from .models import Activity, AuditEvent, Candidate, Certificate, Department, EmployeeItemProgress, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, OnboardingStage, OnboardingStageItem, OrgPreboardingContent, Organization, PreboardingAcknowledgment, QuizAttempt, QuizQuestion, ReadinessSnapshot, TrainingModule, User
+from .models import Activity, AuditEvent, Candidate, Certificate, Department, EmployeeItemProgress, Enrollment, KnowledgeFeedback, MistakeRegisterEntry, Notification, OnboardingStage, OnboardingStageItem, OrgPreboardingContent, Organization, PreboardingAcknowledgment, QuizAttempt, QuizQuestion, ReadinessSnapshot, Rule, RuleChangeSuggestion, RuleRead, RuleVersion, TrainingModule, User
 from .schemas import ActivityCreate, ActivityUpdate, AssignRequest, DepartmentCreate, DepartmentUpdate, EmployeeCreate, EmployeeUpdate, EnrollmentUpdate, FeedbackRequest, FeedbackResolve, LoginRequest, MistakeCreate, MistakeUpdate, ModuleCreate, ModuleUpdate, OrganizationSignup, QuestionCreate, QuestionUpdate, QuizSubmission, SearchRequest, TokenResponse
 from .security import create_token, hash_password, verify_password
 from .seed import MODULES, seed_database
@@ -24,6 +24,23 @@ settings = get_settings()
 
 def audit(db: Session, user: User, action: str, entity_type: str, entity_id: str | None = None, details: dict | None = None) -> None:
     db.add(AuditEvent(org_id=user.org_id, actor_user_id=user.id, action=action, entity_type=entity_type, entity_id=entity_id, details=details or {}))
+
+
+# BUILD PROMPT v5 BLOCK D: mirrors the Edge Function's
+# unreadMandatoryRuleTitles — the actual gating chain, checked at attempt
+# time (not just display time), so this is a real server-side gate.
+def _unread_mandatory_rule_titles(db: Session, user: User) -> list[str]:
+    rules = db.scalars(
+        select(Rule).where(
+            Rule.org_id == user.org_id, Rule.status == "active", Rule.is_mandatory == True,  # noqa: E712
+            or_(Rule.department_id.is_(None), Rule.department_id == user.department_id),
+        )
+    ).all()
+    with_version = [r for r in rules if r.published_version_id]
+    if not with_version:
+        return []
+    read_version_ids = {r.rule_version_id for r in db.scalars(select(RuleRead).where(RuleRead.user_id == user.id)).all()}
+    return [r.title for r in with_version if r.published_version_id not in read_version_ids]
 
 
 # Mirrors Supabase's public.enqueue_onework_reminders(), which runs nightly
@@ -297,9 +314,19 @@ def onboarding_journey(user: User = Depends(current_user), db: Session = Depends
     items = db.scalars(select(OnboardingStageItem).where(OnboardingStageItem.stage_id.in_(stage_ids)).order_by(OnboardingStageItem.sequence)).all() if stage_ids else []
     acks = {p.item_id: p.completed_at for p in db.scalars(select(EmployeeItemProgress).where(EmployeeItemProgress.user_id == user.id)).all()}
     completed_module_ids = {e.module_id for e in db.scalars(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.status == "completed")).all()}
+    # BUILD PROMPT v5 BLOCK D: rules_ack completion is DERIVED, like
+    # training_module — only computed when a rules_ack item actually
+    # exists, to avoid the extra queries on every journey load otherwise.
+    has_rules_ack_item = any(i.item_type == "rules_ack" for i in items)
+    rules_ack_complete = not _unread_mandatory_rule_titles(db, user) if has_rules_ack_item else True
     items_by_stage: dict[str, list] = {}
     for item in items:
-        completed = (item.training_module_id in completed_module_ids) if item.item_type == "training_module" else (item.id in acks)
+        if item.item_type == "training_module":
+            completed = item.training_module_id in completed_module_ids
+        elif item.item_type == "rules_ack":
+            completed = rules_ack_complete
+        else:
+            completed = item.id in acks
         items_by_stage.setdefault(item.stage_id, []).append({
             "id": item.id, "item_type": item.item_type, "training_module_id": item.training_module_id,
             # content_asset always None here — see the model comment on
@@ -307,7 +334,7 @@ def onboarding_journey(user: User = Depends(current_user), db: Session = Depends
             # mirrored in this stack).
             "content_asset_id": item.content_asset_id, "content_asset": None,
             "title": item.title, "description": item.description, "sequence": item.sequence,
-            "completed": completed, "completed_at": None if item.item_type == "training_module" else (acks[item.id].isoformat() if item.id in acks else None),
+            "completed": completed, "completed_at": None if item.item_type in ("training_module", "rules_ack") else (acks[item.id].isoformat() if item.id in acks else None),
         })
     prior_complete = True
     shaped = []
@@ -328,6 +355,8 @@ def complete_onboarding_item(item_id: str, user: User = Depends(current_user), d
         raise HTTPException(404, "This onboarding item couldn't be found.")
     if item.item_type == "training_module":
         raise HTTPException(400, "This item completes automatically once you finish the training module.")
+    if item.item_type == "rules_ack":
+        raise HTTPException(400, "This item completes automatically once you've read every mandatory rule that applies to you.")
     # Idempotent: re-clicking "mark done" after it's already recorded is a
     # no-op, not an error — same pattern as Block A's acknowledge route.
     if not db.scalar(select(EmployeeItemProgress).where(EmployeeItemProgress.user_id == user.id, EmployeeItemProgress.item_id == item.id)):
@@ -620,6 +649,11 @@ def submit_quiz(module_id: str, payload: QuizSubmission, user: User = Depends(cu
     if not module: raise HTTPException(404, "Module not found")
     questions = db.scalars(select(QuizQuestion).where(QuizQuestion.org_id == user.org_id, QuizQuestion.module_id == module_id).order_by(QuizQuestion.created_at)).all()
     if not questions or len(payload.answers) != len(questions): raise HTTPException(400, "Submit one answer for every question")
+    # BUILD PROMPT v5 BLOCK D: gating chain — you cannot even attempt a
+    # quiz while a mandatory rule that applies to you is unread.
+    unread = _unread_mandatory_rule_titles(db, user)
+    if unread:
+        raise HTTPException(403, {"detail": f"Read all mandatory rules before attempting this quiz. Still unread: {', '.join(unread)}.", "unread_rules": unread})
     correct = sum(answer == question.correct_index for answer, question in zip(payload.answers, questions)); score = round(correct / len(questions) * 100); passed = score >= module.passing_score
     db.add(QuizAttempt(org_id=user.org_id, user_id=user.id, module_id=module.id, score=score, passed=passed, answers=payload.answers))
     enrollment = db.scalar(select(Enrollment).where(Enrollment.org_id == user.org_id, Enrollment.user_id == user.id, Enrollment.module_id == module.id))
@@ -957,7 +991,7 @@ def create_onboarding_stage_item(stage_id: str, payload: dict, user: User = Depe
     if not stage:
         raise HTTPException(404, "Stage not found.")
     item_type = payload.get("item_type")
-    if item_type not in ("training_module", "content_block", "custom_task"):
+    if item_type not in ("training_module", "content_block", "custom_task", "rules_ack"):
         raise HTTPException(400, {"detail": "Choose a valid item type.", "field": "item_type"})
     title = str(payload.get("title") or "").strip()
     if not title:
@@ -1011,6 +1045,175 @@ def delete_onboarding_stage_item(item_id: str, user: User = Depends(admin_user),
     db.delete(item)
     audit(db, user, "onboarding_stage_item.delete", "onboarding_stage_item", item_id); db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK D: Rules & Regulations — admin side. Mirrors the
+# Edge Function's /api/v1/admin/rules* routes exactly. See the migration's
+# header comment for the versioning/gating reasoning.
+# ---------------------------------------------------------------------------
+def _rule_version_dict(v: RuleVersion) -> dict:
+    return {"id": v.id, "rule_id": v.rule_id, "version": v.version, "body": v.body, "created_at": v.created_at.isoformat()}
+
+
+@app.get("/api/v1/admin/rules")
+def list_rules(user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rules = db.scalars(select(Rule).where(Rule.org_id == user.org_id).order_by(Rule.created_at.desc())).all()
+    dept_by_id = {d.id: d.name for d in db.scalars(select(Department).where(Department.org_id == user.org_id)).all()}
+    version_by_id = {v.id: v for v in db.scalars(select(RuleVersion)).all()}
+    return [
+        {"id": r.id, "department_id": r.department_id, "department_name": dept_by_id.get(r.department_id) if r.department_id else None,
+         "title": r.title, "category": r.category, "is_mandatory": r.is_mandatory, "status": r.status,
+         "published_version_id": r.published_version_id, "published_version": _rule_version_dict(version_by_id[r.published_version_id]) if r.published_version_id in version_by_id else None,
+         "created_at": r.created_at.isoformat()}
+        for r in rules
+    ]
+
+
+@app.post("/api/v1/admin/rules", status_code=201)
+def create_rule(payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    title = str(payload.get("title") or "").strip()
+    body = str(payload.get("body") or "").strip()
+    if not title:
+        raise HTTPException(400, {"detail": "Title is required.", "field": "title"})
+    if not body:
+        raise HTTPException(400, {"detail": "Rule content is required.", "field": "body"})
+    rule = Rule(org_id=user.org_id, department_id=payload.get("department_id") or None, title=title,
+                category=str(payload.get("category") or "general").strip(), is_mandatory=payload.get("is_mandatory") is not False, created_by=user.id)
+    db.add(rule); db.flush()
+    version = RuleVersion(rule_id=rule.id, version=1, body=body, created_by=user.id)
+    db.add(version); db.flush()
+    rule.published_version_id = version.id
+    audit(db, user, "rule.create", "rule", rule.id, {"title": rule.title}); db.commit()
+    return {"id": rule.id, "title": rule.title, "department_id": rule.department_id, "category": rule.category,
+            "is_mandatory": rule.is_mandatory, "status": rule.status, "published_version_id": rule.published_version_id}
+
+
+@app.patch("/api/v1/admin/rules/{rule_id}")
+def update_rule(rule_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rule = db.scalar(select(Rule).where(Rule.id == rule_id, Rule.org_id == user.org_id))
+    if not rule:
+        raise HTTPException(404, "Rule not found.")
+    if "title" in payload: rule.title = str(payload["title"]).strip()
+    if "category" in payload: rule.category = str(payload["category"]).strip()
+    if "department_id" in payload: rule.department_id = payload["department_id"] or None
+    if "is_mandatory" in payload: rule.is_mandatory = bool(payload["is_mandatory"])
+    if "status" in payload: rule.status = payload["status"]
+    audit(db, user, "rule.update", "rule", rule.id); db.commit()
+    return {"id": rule.id, "title": rule.title, "department_id": rule.department_id, "category": rule.category,
+            "is_mandatory": rule.is_mandatory, "status": rule.status, "published_version_id": rule.published_version_id}
+
+
+@app.post("/api/v1/admin/rules/{rule_id}/versions", status_code=201)
+def create_rule_version(rule_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    rule = db.scalar(select(Rule).where(Rule.id == rule_id, Rule.org_id == user.org_id))
+    if not rule:
+        raise HTTPException(404, "Rule not found.")
+    body = str(payload.get("body") or "").strip()
+    if not body:
+        raise HTTPException(400, {"detail": "Rule content is required.", "field": "body"})
+    latest = db.scalar(select(RuleVersion).where(RuleVersion.rule_id == rule.id).order_by(RuleVersion.version.desc()))
+    version = RuleVersion(rule_id=rule.id, version=(latest.version if latest else 0) + 1, body=body, created_by=user.id)
+    db.add(version); db.flush()
+    rule.published_version_id = version.id
+    audit(db, user, "rule.new_version", "rule", rule.id, {"version": version.version}); db.commit()
+    return _rule_version_dict(version)
+
+
+@app.get("/api/v1/admin/rule-suggestions")
+def list_rule_suggestions(status: str | None = None, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    stmt = select(RuleChangeSuggestion).join(Rule, Rule.id == RuleChangeSuggestion.rule_id).where(Rule.org_id == user.org_id)
+    if status: stmt = stmt.where(RuleChangeSuggestion.status == status)
+    rows = db.scalars(stmt.order_by(RuleChangeSuggestion.created_at.desc())).all()
+    rule_title_by_id = {r.id: r.title for r in db.scalars(select(Rule).where(Rule.org_id == user.org_id)).all()}
+    name_by_id = {u.id: u.full_name for u in db.scalars(select(User).where(User.org_id == user.org_id)).all()}
+    return [
+        {"id": s.id, "rule_id": s.rule_id, "rule_title": rule_title_by_id.get(s.rule_id), "suggested_by": s.suggested_by,
+         "suggested_by_name": name_by_id.get(s.suggested_by), "suggestion_text": s.suggestion_text, "status": s.status,
+         "rejection_reason": s.rejection_reason, "target_implementation_date": s.target_implementation_date.isoformat() if s.target_implementation_date else None,
+         "reviewed_at": s.reviewed_at.isoformat() if s.reviewed_at else None, "created_at": s.created_at.isoformat()}
+        for s in rows
+    ]
+
+
+@app.patch("/api/v1/admin/rule-suggestions/{suggestion_id}")
+def review_rule_suggestion(suggestion_id: str, payload: dict, user: User = Depends(admin_user), db: Session = Depends(get_db)):
+    suggestion = db.scalar(select(RuleChangeSuggestion).join(Rule, Rule.id == RuleChangeSuggestion.rule_id).where(RuleChangeSuggestion.id == suggestion_id, Rule.org_id == user.org_id))
+    if not suggestion:
+        raise HTTPException(404, "Suggestion not found.")
+    status = payload.get("status")
+    if status not in ("under_review", "accepted", "rejected", "implementation_pending", "implemented"):
+        raise HTTPException(400, {"detail": "Choose a valid status.", "field": "status"})
+    if status == "rejected" and not str(payload.get("rejection_reason") or "").strip():
+        raise HTTPException(400, {"detail": "A reason is required when rejecting a suggestion.", "field": "rejection_reason"})
+    suggestion.status = status
+    suggestion.reviewed_by = user.id
+    suggestion.reviewed_at = datetime.utcnow()
+    if status == "rejected": suggestion.rejection_reason = str(payload["rejection_reason"]).strip()
+    if "target_implementation_date" in payload:
+        raw = payload["target_implementation_date"]
+        suggestion.target_implementation_date = date.fromisoformat(raw) if raw else None
+    audit(db, user, "rule_suggestion.review", "rule_change_suggestion", suggestion.id, {"status": suggestion.status}); db.commit()
+    return {"id": suggestion.id, "status": suggestion.status, "rejection_reason": suggestion.rejection_reason,
+            "target_implementation_date": suggestion.target_implementation_date.isoformat() if suggestion.target_implementation_date else None}
+
+
+# ---------------------------------------------------------------------------
+# BUILD PROMPT v5 BLOCK D: Rules & Regulations — employee side. Visibility
+# is department-scoped: department_id = None applies org-wide.
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/rules")
+def list_my_rules(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rules = db.scalars(
+        select(Rule).where(
+            Rule.org_id == user.org_id, Rule.status == "active",
+            or_(Rule.department_id.is_(None), Rule.department_id == user.department_id),
+        )
+    ).all()
+    version_by_id = {v.id: v for v in db.scalars(select(RuleVersion)).all()}
+    read_version_ids = {r.rule_version_id for r in db.scalars(select(RuleRead).where(RuleRead.user_id == user.id)).all()}
+    out = []
+    for r in rules:
+        v = version_by_id.get(r.published_version_id) if r.published_version_id else None
+        out.append({"id": r.id, "title": r.title, "category": r.category, "is_mandatory": r.is_mandatory,
+                     "version_id": v.id if v else None, "version": v.version if v else None, "body": v.body if v else None,
+                     "read": v.id in read_version_ids if v else False})
+    return out
+
+
+@app.post("/api/v1/rules/versions/{version_id}/read")
+def mark_rule_read(version_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    # Idempotent — same pattern as every other "mark as done" route.
+    if not db.scalar(select(RuleRead).where(RuleRead.rule_version_id == version_id, RuleRead.user_id == user.id)):
+        db.add(RuleRead(rule_version_id=version_id, user_id=user.id))
+        db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/rules/{rule_id}/suggest", status_code=201)
+def suggest_rule_change(rule_id: str, payload: dict, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rule = db.scalar(select(Rule).where(Rule.id == rule_id, Rule.org_id == user.org_id))
+    if not rule:
+        raise HTTPException(404, "Rule not found.")
+    text = str(payload.get("suggestion_text") or "").strip()
+    if not text:
+        raise HTTPException(400, {"detail": "Describe your suggested change.", "field": "suggestion_text"})
+    suggestion = RuleChangeSuggestion(rule_id=rule.id, suggested_by=user.id, suggestion_text=text)
+    db.add(suggestion); db.flush(); db.commit()
+    return {"id": suggestion.id, "rule_id": suggestion.rule_id, "suggestion_text": suggestion.suggestion_text, "status": suggestion.status}
+
+
+@app.get("/api/v1/rules/my-suggestions")
+def my_rule_suggestions(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.scalars(select(RuleChangeSuggestion).where(RuleChangeSuggestion.suggested_by == user.id).order_by(RuleChangeSuggestion.created_at.desc())).all()
+    rule_title_by_id = {r.id: r.title for r in db.scalars(select(Rule).where(Rule.org_id == user.org_id)).all()}
+    return [
+        {"id": s.id, "rule_id": s.rule_id, "rule_title": rule_title_by_id.get(s.rule_id), "suggestion_text": s.suggestion_text,
+         "status": s.status, "rejection_reason": s.rejection_reason,
+         "target_implementation_date": s.target_implementation_date.isoformat() if s.target_implementation_date else None,
+         "created_at": s.created_at.isoformat()}
+        for s in rows
+    ]
 
 
 @app.get("/api/v1/admin/employees")
