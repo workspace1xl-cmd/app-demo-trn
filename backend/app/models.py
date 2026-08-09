@@ -185,6 +185,9 @@ class KnowledgeFeedback(Base, TimestampMixin):
     type: Mapped[str] = mapped_column(String(20), default="query")
     target_implementation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # QA REMEDIATION BLOCKER 6: auto-routed at submission time (best-
+    # matching activity's department), or reassigned by an Admin.
+    department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
 
 
 class MistakeRegisterEntry(Base, TimestampMixin):

@@ -122,6 +122,26 @@ function forbidUnlessAdmin(isAdmin: boolean) {
   return isAdmin ? null : json({ detail: "Administrator permission required." }, 403);
 }
 
+// QA REMEDIATION BLOCKER 6: "that query goes to the particular
+// department automatically or someone can then assign it to a
+// particular department." Reuses activities.department — the same
+// real, admin-maintained topic-to-department mapping Knowledge Search
+// already matches queries against — as the auto-routing signal, rather
+// than inventing a separate keyword-rules table. Same ILIKE
+// term-extraction Search uses; the best-matching activity's department
+// wins. Returns null (unrouted) when nothing matches, which an Admin
+// can then assign manually from the Feedback Queue.
+async function autoRouteDepartmentId(orgId: string, text: string): Promise<string | null> {
+  const stopWords = new Set(["a", "an", "and", "can", "do", "does", "for", "how", "i", "is", "my", "of", "process", "request", "the", "to", "what", "where", "who"]);
+  const terms = text.toLowerCase().split(/\s+/).map((t) => t.replace(/[^a-z0-9-]/g, "")).filter((t) => t.length > 2 && !stopWords.has(t)).slice(0, 6);
+  if (!terms.length) return null;
+  const activityFilters = terms.flatMap((term) => [`name.ilike.%${term}%`, `department.ilike.%${term}%`, `responsible_role.ilike.%${term}%`]).join(",");
+  const { data: activity } = await supabase.from("activities").select("department").eq("org_id", orgId).or(activityFilters).limit(1).maybeSingle();
+  if (!activity?.department) return null;
+  const { data: department } = await supabase.from("departments").select("id").eq("org_id", orgId).ilike("name", activity.department).maybeSingle();
+  return department?.id || null;
+}
+
 // BUILD PROMPT v4 item 6: captures today's org-wide readiness into
 // readiness_snapshots so the exec view has a trend to draw — reuses
 // whatever readiness was JUST computed by scoreFromComponents() rather
@@ -762,7 +782,11 @@ Deno.serve(async (req) => {
     }
 
     if (path === "/api/v1/feedback" && req.method === "POST") {
-      const body = await req.json(); const { data, error } = await supabase.from("knowledge_feedback").insert({ org_id: user.org_id, user_id: user.id, query: body.query, reason: body.reason, type: "query", routed_to: "Knowledge governance queue" }).select().single(); if (error) throw error; await audit(user, "feedback.create", "knowledge_feedback", data.id); return json({ id: data.id, status: data.status, routed_to: data.routed_to }, 201);
+      const body = await req.json();
+      // QA REMEDIATION BLOCKER 6: auto-route to the best-matching
+      // department at submission time; an Admin can reassign it later.
+      const departmentId = await autoRouteDepartmentId(user.org_id, `${body.query} ${body.reason || ""}`);
+      const { data, error } = await supabase.from("knowledge_feedback").insert({ org_id: user.org_id, user_id: user.id, query: body.query, reason: body.reason, type: "query", routed_to: "Knowledge governance queue", department_id: departmentId }).select().single(); if (error) throw error; await audit(user, "feedback.create", "knowledge_feedback", data.id, departmentId ? { auto_routed_department_id: departmentId } : undefined); return json({ id: data.id, status: data.status, routed_to: data.routed_to, department_id: data.department_id }, 201);
     }
 
     // -------------------------------------------------------------------
@@ -1396,9 +1420,21 @@ Deno.serve(async (req) => {
       const { page, pageSize, from, to } = paginate(rawUrl);
       const type = rawUrl.searchParams.get("type") || "query";
       const status = rawUrl.searchParams.get("status") || (type === "suggestion" ? "submitted" : "open");
-      const { data, error, count } = await supabase.from("knowledge_feedback").select("id,type,query,reason,status,resolution,rejection_reason,target_implementation_date,created_at,resolved_at,app_users!knowledge_feedback_user_id_fkey(full_name)", { count: "exact" }).eq("org_id", user.org_id).eq("type", type).eq("status", status).order("created_at", { ascending: false }).range(from, to);
+      // QA REMEDIATION BLOCKER 6: department_id + its resolved name
+      // surfaced to the queue, same "Applies To" pattern Rules already
+      // uses for department_id -> department_name. Optional
+      // ?department_id= filter so an admin can view just their
+      // department's queue, not a single flat undifferentiated one.
+      const departmentFilter = rawUrl.searchParams.get("department_id");
+      let feedbackQuery = supabase.from("knowledge_feedback").select("id,type,query,reason,status,resolution,rejection_reason,target_implementation_date,department_id,created_at,resolved_at,app_users!knowledge_feedback_user_id_fkey(full_name)", { count: "exact" }).eq("org_id", user.org_id).eq("type", type).eq("status", status).order("created_at", { ascending: false }).range(from, to);
+      if (departmentFilter) feedbackQuery = feedbackQuery.eq("department_id", departmentFilter);
+      const [{ data, error, count }, { data: departments }] = await Promise.all([
+        feedbackQuery,
+        supabase.from("departments").select("id,name").eq("org_id", user.org_id),
+      ]);
       if (error) throw error;
-      return json({ items: (data || []).map((item: any) => ({ id: item.id, type: item.type, query: item.query, reason: item.reason, status: item.status, resolution: item.resolution, rejection_reason: item.rejection_reason, target_implementation_date: item.target_implementation_date, created_at: item.created_at, resolved_at: item.resolved_at, employee: item.app_users?.full_name || "Unknown" })), page, page_size: pageSize, total: count || 0 });
+      const deptNameById = new Map((departments || []).map((d) => [d.id, d.name]));
+      return json({ items: (data || []).map((item: any) => ({ id: item.id, type: item.type, query: item.query, reason: item.reason, status: item.status, resolution: item.resolution, rejection_reason: item.rejection_reason, target_implementation_date: item.target_implementation_date, department_id: item.department_id, department_name: item.department_id ? deptNameById.get(item.department_id) || null : null, created_at: item.created_at, resolved_at: item.resolved_at, employee: item.app_users?.full_name || "Unknown" })), page, page_size: pageSize, total: count || 0 });
     }
     const feedbackMatch = path.match(/^\/api\/v1\/admin\/feedback\/([^/]+)$/);
     if (feedbackMatch && req.method === "PATCH") {
@@ -1406,27 +1442,38 @@ Deno.serve(async (req) => {
       const { data: existing } = await supabase.from("knowledge_feedback").select("id,type,user_id,query").eq("id", feedbackMatch[1]).eq("org_id", user.org_id).maybeSingle();
       if (!existing) return json({ detail: "Item not found." }, 404);
       const body = await req.json();
-      const patch: Record<string, unknown> = { status: body.status };
-      if (existing.type === "suggestion") {
-        // BUILD PROMPT v5 BLOCK G: the same 5-state lifecycle Block D's
-        // rule_change_suggestions uses. Mandatory rejection reason —
-        // same rule as everywhere else rejection reasons are required.
-        if (!["under_review","accepted","rejected","implementation_pending","implemented"].includes(body.status)) return fieldError("status", "Choose a valid status.");
-        if (body.status === "rejected" && !body.rejection_reason?.trim()) return fieldError("rejection_reason", "A reason is required when rejecting a suggestion.");
-        if (body.status === "rejected") patch.rejection_reason = body.rejection_reason.trim();
-        if (body.target_implementation_date !== undefined) patch.target_implementation_date = body.target_implementation_date || null;
-        patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString();
-      } else {
-        if (!["resolved","dismissed","in_review"].includes(body.status)) return fieldError("status", "Select a valid status.");
-        if (body.status !== "in_review" && !body.resolution?.trim()) return fieldError("resolution", "Resolution notes are required.");
-        if (body.status !== "in_review") { patch.resolution = body.resolution.trim(); patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString(); }
+      const patch: Record<string, unknown> = {};
+      // QA REMEDIATION BLOCKER 6: "or someone can then assign it to a
+      // particular department" — reassignable independently of a status
+      // change, so an admin can route a still-open query before ever
+      // resolving it.
+      if (body.department_id !== undefined) patch.department_id = body.department_id || null;
+      if (body.status !== undefined) {
+        patch.status = body.status;
+        if (existing.type === "suggestion") {
+          // BUILD PROMPT v5 BLOCK G: the same 5-state lifecycle Block D's
+          // rule_change_suggestions uses. Mandatory rejection reason —
+          // same rule as everywhere else rejection reasons are required.
+          if (!["under_review","accepted","rejected","implementation_pending","implemented"].includes(body.status)) return fieldError("status", "Choose a valid status.");
+          if (body.status === "rejected" && !body.rejection_reason?.trim()) return fieldError("rejection_reason", "A reason is required when rejecting a suggestion.");
+          if (body.status === "rejected") patch.rejection_reason = body.rejection_reason.trim();
+          if (body.target_implementation_date !== undefined) patch.target_implementation_date = body.target_implementation_date || null;
+          patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString();
+        } else {
+          if (!["resolved","dismissed","in_review"].includes(body.status)) return fieldError("status", "Select a valid status.");
+          if (body.status !== "in_review" && !body.resolution?.trim()) return fieldError("resolution", "Resolution notes are required.");
+          if (body.status !== "in_review") { patch.resolution = body.resolution.trim(); patch.resolved_by = user.id; patch.resolved_at = new Date().toISOString(); }
+        }
       }
+      if (!Object.keys(patch).length) return fieldError("status", "Nothing to update.");
       const { data, error } = await supabase.from("knowledge_feedback").update(patch).eq("id", feedbackMatch[1]).select().maybeSingle();
       if (error) throw error; if (!data) return json({ detail: "Item not found." }, 404);
-      // Notify the submitter — reuses the same notification_outbox the
-      // bell dropdown already reads (Block G's "notification integration").
-      await supabase.from("notification_outbox").insert({ org_id: user.org_id, user_id: existing.user_id, kind: "submission_update", subject: `Your ${existing.type} "${existing.query.slice(0, 60)}" is now ${String(body.status).replace(/_/g, " ")}.`, payload: { submission_id: data.id, status: body.status } });
-      await audit(user, existing.type === "suggestion" ? "submission.review" : "feedback.resolve", "knowledge_feedback", data.id, { status: body.status }); return json(data);
+      // Notify the submitter only on a real status change — a pure
+      // department reassignment isn't news to them.
+      if (body.status !== undefined) {
+        await supabase.from("notification_outbox").insert({ org_id: user.org_id, user_id: existing.user_id, kind: "submission_update", subject: `Your ${existing.type} "${existing.query.slice(0, 60)}" is now ${String(body.status).replace(/_/g, " ")}.`, payload: { submission_id: data.id, status: body.status } });
+      }
+      await audit(user, existing.type === "suggestion" ? "submission.review" : "feedback.resolve", "knowledge_feedback", data.id, { status: body.status, department_id: body.department_id }); return json(data);
     }
 
     // -------------------------------------------------------------------
