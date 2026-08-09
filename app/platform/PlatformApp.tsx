@@ -238,6 +238,13 @@ export default function WorkingPlatform() {
   const [error, setError] = useState("");
   const [data, setData] = useState<PlatformData>(null);
   const [journey, setJourney] = useState<Journey | null>(null);
+  // QA REMEDIATION BLOCKER 1: a failed journey fetch used to be swallowed
+  // silently (setJourney(null)) — which renders identically to "onboarding
+  // is genuinely complete," so a transient network/server error looked
+  // exactly like a fully-onboarded employee and quietly let them straight
+  // into the generic dashboard. Tracked separately so the two cases can
+  // finally be told apart and the real one gets a visible retry instead.
+  const [journeyError, setJourneyError] = useState(false);
   const [journeyBusyId, setJourneyBusyId] = useState<string | null>(null);
   const [query, setQuery] = useState("leave");
   // BUILD PROMPT v5 BLOCK H: Knowledge Search default state.
@@ -482,9 +489,16 @@ export default function WorkingPlatform() {
   // journeyBusyId as a dependency (that would double-fetch on every click).
   useEffect(() => {
     if (!session || view !== "dashboard" || session.user.role === "admin") return;
-    request<Journey>("/api/v1/onboarding/journey", session.access_token)
-      .then(setJourney)
-      .catch(() => setJourney(null));
+    const timer = window.setTimeout(() => {
+      setJourneyError(false);
+      request<Journey>("/api/v1/onboarding/journey", session.access_token)
+        .then(setJourney)
+        .catch(() => {
+          setJourney(null);
+          setJourneyError(true);
+        });
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [session, view, reloadKey]);
 
   async function completeJourneyItem(itemId: string) {
@@ -950,6 +964,20 @@ export default function WorkingPlatform() {
           )}
           {busy && data && <div className={styles.syncingBadge}>Syncing…</div>}
           {error && <div className={styles.error}>{error}</div>}
+          {/* QA REMEDIATION BLOCKER 1: a failed onboarding-status check must
+              never silently fall through to the generic dashboard — that
+              looks identical to "onboarding complete" and is exactly how a
+              genuinely-incomplete employee could land somewhere they
+              shouldn't. Shown instead of, not alongside, the dashboard
+              below (see that block's !journeyError condition). */}
+          {journeyError && (
+            <div className={styles.error}>
+              Could not load your onboarding status.{" "}
+              <button type="button" className={styles.journeyLinkBtn} onClick={() => setReloadKey((k) => k + 1)}>
+                Retry
+              </button>
+            </div>
+          )}
           {/* BUILD PROMPT v5 BLOCK B: stage-gated onboarding home. Replaces
               the standard dashboard hero entirely while any stage remains
               incomplete; the moment journey_complete flips true (server-
@@ -1021,7 +1049,7 @@ export default function WorkingPlatform() {
               </ol>
             </section>
           )}
-          {dashboardData && (!journey || journey.journey_complete || journey.stages.length === 0) && (
+          {dashboardData && !journeyError && (!journey || journey.journey_complete || journey.stages.length === 0) && (
             <>
               <section className={styles.hero}>
                 <div>
