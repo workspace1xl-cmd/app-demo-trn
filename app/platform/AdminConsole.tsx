@@ -2032,7 +2032,7 @@ function ExecPanel({ token }: { token: string }) {
 // is meaningless without its parent stage's context.
 // ---------------------------------------------------------------------------
 
-type JourneyAdminItem = { id: string; stage_id: string; item_type: "training_module" | "content_block" | "custom_task"; training_module_id: string | null; content_asset_id: string | null; content_asset: { title: string; kind: string; message_subtype: string | null } | null; title: string; description: string; sequence: number };
+type JourneyAdminItem = { id: string; stage_id: string; item_type: "training_module" | "content_block" | "custom_task" | "rules_ack"; training_module_id: string | null; content_asset_id: string | null; content_asset: { title: string; kind: string; message_subtype: string | null } | null; title: string; description: string; sequence: number };
 type JourneyAdminStage = { id: string; name: string; description: string; sequence: number; items: JourneyAdminItem[] };
 
 function OnboardingJourneyPanel({ token }: { token: string }) {
@@ -2080,6 +2080,7 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
         { value: "training_module", label: "Training Module (completes automatically)" },
         { value: "custom_task", label: "Custom Task (employee marks it done)" },
         { value: "content_block", label: "Content Block (employee marks it done)" },
+        { value: "rules_ack", label: "Rules & Regulations (completes automatically)" },
       ] },
       { key: "training_module_id", label: "Training Module", type: "select", options: trainingModules.map((m) => ({ value: m.id, label: m.title })), helpText: "Only used when Item Type is Training Module." },
       { key: "content_asset_id", label: "Onboarding Message", type: "select", options: messageAssets.map((m) => ({ value: m.id, label: `${m.title} (${messageSubtypeLabel(m.message_subtype)})` })), helpText: "Only used when Item Type is Content Block — leave blank for a plain acknowledge-this-title item." },
@@ -2095,8 +2096,9 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
       <div className={styles.formGrid} style={{ display: "block" }}>
         <p style={{ color: "#7c8090", fontSize: 13, margin: "0 0 16px" }}>
           New employees see these stages, in order, on their dashboard until every stage is complete. A stage unlocks
-          once the one before it is fully done. Rules &amp; Regulations acknowledgment isn&apos;t an item type yet —
-          that module doesn&apos;t exist yet either.
+          once the one before it is fully done. A Rules &amp; Regulations item completes automatically once the
+          employee has read every mandatory rule that applies to them — configure the rules themselves under
+          Governance → Rules &amp; Regulations.
         </p>
         <Feedback error={error} toast={toast} />
         <button type="button" className={styles.primaryBtn} onClick={() => setStageModal({ mode: "create" })} style={{ marginBottom: 18 }}>
@@ -2122,7 +2124,7 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
                     <div>
                       <b style={{ fontSize: 13 }}>{item.title}</b>
                       <small style={{ display: "block", color: "#8b8f9e", fontSize: 12 }}>
-                        {item.item_type === "training_module" ? "Training Module (auto)" : item.item_type === "custom_task" ? "Custom Task" : "Content Block"}
+                        {item.item_type === "training_module" ? "Training Module (auto)" : item.item_type === "rules_ack" ? "Rules & Regulations (auto)" : item.item_type === "custom_task" ? "Custom Task" : "Content Block"}
                         {item.content_asset ? ` · Linked: ${item.content_asset.title}` : ""}
                         {item.description ? ` · ${item.description}` : ""}
                       </small>
@@ -2220,6 +2222,188 @@ function OnboardingJourneyPanel({ token }: { token: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// BUILD PROMPT v5 BLOCK D: Rules & Regulations — versioned rules,
+// department-scoped visibility, suggest-a-change review queue.
+// ---------------------------------------------------------------------------
+
+type AdminRule = { id: string; department_id: string | null; department_name: string | null; title: string; category: string; is_mandatory: boolean; status: string; published_version_id: string | null; published_version: { version: number; body: string } | null; created_at: string };
+type RuleSuggestion = { id: string; rule_id: string; rule_title: string; suggested_by: string; suggested_by_name: string; suggestion_text: string; status: string; rejection_reason: string | null; target_implementation_date: string | null; reviewed_at: string | null; created_at: string };
+
+const SUGGESTION_STATUSES = ["submitted", "under_review", "accepted", "rejected", "implementation_pending", "implemented"];
+
+function RulesPanel({ token }: { token: string }) {
+  const [tab, setTab] = useState<"rules" | "suggestions">("rules");
+  return (
+    <section>
+      <div className={styles.adminSubTabs}>
+        <button type="button" data-active={tab === "rules"} onClick={() => setTab("rules")}>Rules</button>
+        <button type="button" data-active={tab === "suggestions"} onClick={() => setTab("suggestions")}>Suggested Changes</button>
+      </div>
+      {tab === "rules" ? <RulesListTab token={token} /> : <RuleSuggestionsTab token={token} />}
+    </section>
+  );
+}
+
+function RulesListTab({ token }: { token: string }) {
+  const [rules, setRules] = useState<AdminRule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const [modal, setModal] = useState<null | { mode: "create" } | { mode: "edit"; row: AdminRule }>(null);
+  const [versionModal, setVersionModal] = useState<AdminRule | null>(null);
+  const departments = useLookup<{ id: string; name: string }>(token, "/api/v1/admin/departments");
+
+  function load() {
+    request<AdminRule[]>("/api/v1/admin/rules", token)
+      .then((data) => { setRules(data); setError(""); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load the rules."))
+      .finally(() => setLoading(false));
+  }
+  useEffect(() => { load(); }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ruleFields: FieldDef[] = [
+    { key: "title", label: "Title", type: "text", required: true },
+    { key: "category", label: "Category", type: "text", placeholder: "e.g. conduct, security, leave" },
+    { key: "department_id", label: "Department", type: "select", options: departments.map((d) => ({ value: d.id, label: d.name })), helpText: "Leave blank to apply organisation-wide." },
+    { key: "is_mandatory", label: "Mandatory", type: "select", options: [{ value: "true", label: "Yes — blocks quiz attempts until read" }, { value: "false", label: "No" }] },
+    ...(modal?.mode === "create" ? [{ key: "body", label: "Rule Content", type: "textarea" as const, required: true }] : []),
+  ];
+
+  if (loading) return <div className={styles.loading}>Synchronising verified data…</div>;
+  return (
+    <>
+      <Feedback error={error} toast={toast} />
+      <button type="button" className={styles.primaryBtn} onClick={() => setModal({ mode: "create" })} style={{ marginBottom: 14 }}>
+        + Add Rule
+      </button>
+      <DataTable
+        columns={[
+          { key: "title", label: "Title", render: (row) => (<><b>{row.title}</b><small>{row.category} · v{row.published_version?.version ?? "—"}</small></>) },
+          { key: "department_name", label: "Applies To", render: (row) => row.department_name || "Whole organisation" },
+          { key: "is_mandatory", label: "Mandatory", render: (row) => <StatusBadge status={row.is_mandatory ? "active" : "inactive"} /> },
+          { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
+        ]}
+        rows={rules}
+        rowId={(row) => row.id}
+        loading={loading}
+        actions={(row) => (
+          <div className={styles.workflowRow}>
+            <button className={styles.iconBtn} data-tip="Edit" onClick={() => setModal({ mode: "edit", row })}>✎</button>
+            <button className={styles.iconBtn} data-tip="New Version" onClick={() => setVersionModal(row)}>⤴</button>
+          </div>
+        )}
+      />
+      {modal && (
+        <FormModal
+          title={modal.mode === "create" ? "Add Rule" : "Edit Rule"}
+          fields={ruleFields}
+          initialValues={modal.mode === "edit" ? { title: modal.row.title, category: modal.row.category, department_id: modal.row.department_id || "", is_mandatory: String(modal.row.is_mandatory) } : { is_mandatory: "true" }}
+          submitLabel={modal.mode === "create" ? "Add Rule" : "Save Changes"}
+          onCancel={() => setModal(null)}
+          onSubmit={async (values) => {
+            const payload = { ...values, is_mandatory: values.is_mandatory === "true" };
+            if (modal.mode === "create") await submitJson("/api/v1/admin/rules", token, "POST", payload);
+            else await submitJson(`/api/v1/admin/rules/${modal.row.id}`, token, "PATCH", payload);
+            setToast(modal.mode === "create" ? "Rule added successfully." : "Rule updated successfully.");
+            setTimeout(() => setToast(""), 3000);
+            setModal(null); load();
+          }}
+        />
+      )}
+      {versionModal && (
+        <FormModal
+          title={`New Version — ${versionModal.title}`}
+          fields={[{ key: "body", label: "Updated Rule Content", type: "textarea", required: true }]}
+          initialValues={{ body: versionModal.published_version?.body || "" }}
+          submitLabel="Publish New Version"
+          onCancel={() => setVersionModal(null)}
+          onSubmit={async (values) => {
+            await submitJson(`/api/v1/admin/rules/${versionModal.id}/versions`, token, "POST", values);
+            setToast("New version published. Everyone's read status for this rule has reset.");
+            setTimeout(() => setToast(""), 4000);
+            setVersionModal(null); load();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function RuleSuggestionsTab({ token }: { token: string }) {
+  const [statusFilter, setStatusFilter] = useState("submitted");
+  const [suggestions, setSuggestions] = useState<RuleSuggestion[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const [reviewRow, setReviewRow] = useState<RuleSuggestion | null>(null);
+
+  function load() {
+    request<RuleSuggestion[]>(`/api/v1/admin/rule-suggestions?status=${statusFilter}`, token)
+      .then((data) => { setSuggestions(data); setError(""); })
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load suggestions."))
+      .finally(() => setLoading(false));
+  }
+  useEffect(() => { load(); }, [token, statusFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <>
+      <div className={styles.adminTabs} style={{ borderBottom: "none", marginBottom: 12 }}>
+        {SUGGESTION_STATUSES.map((status) => (
+          <button key={status} className={statusFilter === status ? styles.adminTabActive : ""} onClick={() => { setLoading(true); setStatusFilter(status); }}>
+            {status.replace(/_/g, " ")}
+          </button>
+        ))}
+      </div>
+      <Feedback error={error} toast={toast} />
+      {loading ? (
+        <div className={styles.loading}>Synchronising verified data…</div>
+      ) : (
+        <DataTable
+          columns={[
+            { key: "rule_title", label: "Rule", render: (row) => (<><b>{row.rule_title}</b><small>Suggested by {row.suggested_by_name}</small></>) },
+            { key: "suggestion_text", label: "Suggestion" },
+            { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
+          ]}
+          rows={suggestions}
+          rowId={(row) => row.id}
+          loading={false}
+          actions={(row) => (
+            ["accepted", "rejected", "implemented"].includes(row.status)
+              ? <span style={{ fontSize: 8, color: "#8b8f9e" }}>Closed</span>
+              : <button className={styles.secondaryBtn} onClick={() => setReviewRow(row)}>Review</button>
+          )}
+        />
+      )}
+      {reviewRow && (
+        <FormModal
+          title={`Review — ${reviewRow.rule_title}`}
+          fields={[
+            { key: "status", label: "Decision", type: "select", required: true, options: [
+              { value: "under_review", label: "Under Review" },
+              { value: "accepted", label: "Accepted" },
+              { value: "rejected", label: "Rejected" },
+              { value: "implementation_pending", label: "Implementation Pending" },
+              { value: "implemented", label: "Implemented" },
+            ] },
+            { key: "rejection_reason", label: "Rejection Reason", type: "textarea", helpText: "Required when Decision is Rejected." },
+            { key: "target_implementation_date", label: "Target Implementation Date", type: "date" },
+          ]}
+          initialValues={{ status: "under_review" }}
+          submitLabel="Save Decision"
+          onCancel={() => setReviewRow(null)}
+          onSubmit={async (values) => {
+            if (values.status === "rejected" && !values.rejection_reason?.trim()) throw Object.assign(new Error("A reason is required when rejecting a suggestion."), { field: "rejection_reason" });
+            await submitJson(`/api/v1/admin/rule-suggestions/${reviewRow.id}`, token, "PATCH", values);
+            setToast("Decision saved successfully."); setTimeout(() => setToast(""), 3000);
+            setReviewRow(null); load();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -2233,6 +2417,7 @@ export default function AdminConsole({ token, section }: { token: string; sectio
     case "assignments": return <AssignmentsPanel token={token} />;
     case "content": return <ContentSection token={token} />;
     case "journey": return <OnboardingJourneyPanel token={token} />;
+    case "rules": return <RulesPanel token={token} />;
     case "feedback": return <FeedbackPanel token={token} />;
     case "audit": return <AuditPanel token={token} />;
     case "exec": return <ExecPanel token={token} />;
