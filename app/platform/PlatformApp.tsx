@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import styles from "./platform.module.css";
 import AdminConsole from "./AdminConsole";
+import ManagementOverview from "./ManagementOverview";
+import { Icon, type IconName } from "./icons";
 import OrgSignup from "./OrgSignup";
 import QuizPlayer from "./QuizPlayer";
 import ResponsibilityGraph, { type GraphActivity } from "./ResponsibilityGraph";
@@ -49,21 +51,77 @@ export type AdminSection =
   | "audit"
   | "exec";
 const ADMIN_SECTION_IDS: AdminSection[] = ["overview", "employees", "departments", "candidates", "matrix", "training", "assignments", "content", "journey", "rules", "feedback", "audit", "exec"];
-// Ten flat tabs read as a wall of text — grouped here into 5 clusters
-// (icons + labels, current-section highlighted, sized to the "5-8
-// top-level items" guidance) purely as a navigation reorganisation.
-// Every existing route/screen/AdminSection is untouched; this only
-// changes how the tab bar presents them.
-const ADMIN_GROUPS: { key: string; label: string; icon: string; sections: [AdminSection, string][] }[] = [
-  { key: "insights", label: "Insights", icon: "◈", sections: [["overview", "Overview"], ["exec", "Exec View"]] },
-  { key: "people", label: "People", icon: "◍", sections: [["employees", "Employees"], ["departments", "Departments"], ["candidates", "Candidates"]] },
-  { key: "learning", label: "Learning", icon: "◎", sections: [["training", "Training & Quiz Builder"], ["assignments", "Assignments"], ["content", "Content Library"], ["journey", "Onboarding Journey"]] },
-  { key: "ownership", label: "Ownership", icon: "⬡", sections: [["matrix", "Responsibility Matrix"]] },
-  { key: "governance", label: "Governance", icon: "◉", sections: [["rules", "Rules & Regulations"], ["feedback", "Feedback Queue"], ["audit", "Audit Log"]] },
+// MANAGEMENT INFORMATION ARCHITECTURE
+//
+// Management's complaint was that this menu was confusing — not that the
+// functionality was wrong. So this is a relabelling and regrouping of the
+// SAME thirteen AdminSection ids above: every id here is unchanged, which
+// means every route, component, API call and permission check behind them
+// is untouched. Only the words, the grouping and the icons changed.
+//
+// Two substantive regroupings, both straight from the brief:
+//   * "Governance" bundled Rules + Feedback + Audit behind one word nobody
+//     outside the product recognised. It is now three separate top-level
+//     concepts: Compliance, Feedback, Activity Log.
+//   * "Exec View" is no longer a primary label — it's the second tab inside
+//     Overview, where someone looking for "how are we doing" will find it.
+//
+// Seven groups, which is the brief's 5-7 ceiling. See
+// docs/MANAGEMENT_IA_MAP.md for the full old -> new safety map.
+type ManagementGroup = {
+  key: string;
+  label: string;
+  icon: IconName;
+  blurb: string;
+  sections: [AdminSection, string][];
+};
+const MANAGEMENT_GROUPS: ManagementGroup[] = [
+  { key: "overview", label: "Overview", icon: "overview", blurb: "How the organisation is doing.",
+    sections: [["overview", "Overview"], ["exec", "Executive View"]] },
+  { key: "people", label: "People", icon: "people", blurb: "Everyone in the organisation.",
+    sections: [["employees", "Employees"], ["departments", "Departments"], ["candidates", "Candidates"]] },
+  { key: "learning", label: "Learning", icon: "learning", blurb: "Training, assignments and onboarding.",
+    sections: [["training", "Training & Quizzes"], ["assignments", "Assignments"], ["content", "Content Library"], ["journey", "Onboarding Journey"]] },
+  { key: "responsibilities", label: "Responsibilities", icon: "responsibilities", blurb: "Who owns what, and where the gaps are.",
+    sections: [["matrix", "Responsibility Matrix"]] },
+  { key: "compliance", label: "Compliance", icon: "compliance", blurb: "Rules, policies and suggested changes.",
+    sections: [["rules", "Rules & Policies"]] },
+  { key: "feedback", label: "Feedback", icon: "feedback", blurb: "What employees have raised.",
+    sections: [["feedback", "Feedback"]] },
+  { key: "audit", label: "Activity Log", icon: "activity", blurb: "See who changed what and when.",
+    sections: [["audit", "Activity Log"]] },
 ];
-function adminGroupFor(section: AdminSection) {
-  return ADMIN_GROUPS.find((g) => g.sections.some(([id]) => id === section)) || ADMIN_GROUPS[0];
+function managementGroupFor(section: AdminSection) {
+  return MANAGEMENT_GROUPS.find((g) => g.sections.some(([id]) => id === section)) || MANAGEMENT_GROUPS[0];
 }
+
+// The personal (non-management) side of the sidebar. Same View ids and the
+// same order of capability as before — only the labels and icons changed,
+// and they're grouped under a heading so an admin can tell at a glance which
+// items are "the organisation" and which are "my own work".
+const MY_WORK_NAV: { id: View; icon: IconName; label: string }[] = [
+  { id: "training", icon: "learning", label: "My Learning" },
+  { id: "search", icon: "knowledge", label: "Knowledge" },
+  { id: "rules", icon: "rules", label: "Rules & Regulations" },
+  { id: "matrix", icon: "responsibilities", label: "Who does what" },
+  { id: "graph", icon: "graph", label: "Responsibility graph" },
+  { id: "certificates", icon: "certificate", label: "Certificates" },
+  { id: "submissions", icon: "submissions", label: "My Submissions" },
+];
+// One flat lookup for the page title / breadcrumb, so the header can name
+// any View without caring which sidebar group it sits in.
+const VIEW_LABELS: Record<View, string> = {
+  dashboard: "Home",
+  search: "Knowledge",
+  training: "My Learning",
+  matrix: "Who does what",
+  graph: "Responsibility graph",
+  certificates: "Certificates",
+  rules: "Rules & Regulations",
+  submissions: "My Submissions",
+  manager: "My Team",
+  admin: "Management",
+};
 
 type Activity = {
   id: string; name: string; department: string; responsible_role: string;
@@ -251,9 +309,11 @@ export default function WorkingPlatform() {
     view === "admin" && (ADMIN_SECTION_IDS as string[]).includes(rawSection ?? "") ? (rawSection as AdminSection) : "overview";
 
   function goToView(id: View) {
+    setDrawerOpen(false);
     router.push(`/platform/${id}`);
   }
   function goToAdminSection(id: AdminSection) {
+    setDrawerOpen(false);
     router.push(`/platform/admin/${id}`);
   }
 
@@ -283,6 +343,32 @@ export default function WorkingPlatform() {
   const [activeVideo, setActiveVideo] = useState<ModuleResource | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const headingRef = useRef<HTMLHeadingElement>(null);
+
+  // Sidebar presentation state. Declared up here with the other hooks
+  // because the sign-in early-returns below sit between this and the render
+  // that uses it — rules of hooks requires every hook to run on every
+  // render regardless of those returns.
+  //
+  // `collapsed` is the desktop/tablet icon-rail toggle; `drawerOpen` is the
+  // mobile off-canvas drawer. They're separate because they mean different
+  // things: a collapsed rail is still visible, a closed drawer is not.
+  const [collapsed, setCollapsed] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  // Restored after mount rather than in a lazy initializer: localStorage
+  // doesn't exist during the server render, and the deferred set keeps this
+  // out of the synchronous effect body (same pattern as the session restore
+  // above).
+  useEffect(() => {
+    if (localStorage.getItem("onework-nav-collapsed") !== "true") return;
+    const timer = window.setTimeout(() => setCollapsed(true), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  function toggleCollapsed() {
+    setCollapsed((v) => {
+      localStorage.setItem("onework-nav-collapsed", String(!v));
+      return !v;
+    });
+  }
 
   // Reset whatever the previous screen had loaded as soon as the
   // URL-derived view changes — via a nav click, the browser Back/Forward
@@ -315,6 +401,28 @@ export default function WorkingPlatform() {
       router.replace(session.user.role === "admin" ? "/platform/admin" : "/platform/dashboard");
     }
   }, [session, slug, router]);
+
+  // Role guard for deep links into a screen this person can't use.
+  //
+  // login() already refuses to *land* a non-admin on /platform/admin, but
+  // nothing stopped an already-signed-in employee from typing that URL (or
+  // using Back into it after a role switch). The API refused every request,
+  // so no data ever leaked — but the admin shell still drew itself around
+  // the errors: management breadcrumbs, "+ Add Employee", "Import CSV". An
+  // employee should not see a management console at all, working or not.
+  //
+  // This is a client-side redirect for the benefit of the person using it.
+  // It is NOT the security boundary and isn't pretending to be: that is
+  // still the FastAPI `admin_user` / manager dependency on every endpoint,
+  // which is unchanged.
+  useEffect(() => {
+    if (!session) return;
+    const role = session.user.role;
+    const blocked =
+      (view === "admin" && role !== "admin") ||
+      (view === "manager" && role !== "manager" && role !== "admin");
+    if (blocked) router.replace("/platform/dashboard");
+  }, [session, view, router]);
 
   // Accessibility: move focus to the new screen's heading on every route
   // change, matching how a full page navigation would behave. Without this,
@@ -828,22 +936,9 @@ export default function WorkingPlatform() {
       </main>
     );
 
-  const nav: [View, string, string][] = [
-    ["dashboard", "⌂", "Dashboard"],
-    ["search", "⌕", "Knowledge search"],
-    ["training", "◈", "My learning"],
-    ["matrix", "◎", "Who does what"],
-    ["graph", "⬡", "Responsibility graph"],
-    ["certificates", "◇", "Certificates"],
-    ["rules", "▦", "Rules & Regulations"],
-    ["submissions", "✎", "My Submissions"],
-    ...(session.user.role === "manager" || session.user.role === "admin"
-      ? [["manager", "◫", "My team"] as [View, string, string]]
-      : []),
-    ...(session.user.role === "admin"
-      ? [["admin", "⚙", "Admin analytics"] as [View, string, string]]
-      : []),
-  ];
+  const isAdmin = session.user.role === "admin";
+  const isManager = session.user.role === "manager" || isAdmin;
+  const activeManagementGroup = view === "admin" ? managementGroupFor(adminSection) : null;
   const dashboardData =
     view === "dashboard" && data && !Array.isArray(data) && "user" in data
       ? (data as DashboardData)
@@ -859,37 +954,93 @@ export default function WorkingPlatform() {
   const managerData =
     view === "manager" && data && !Array.isArray(data) && "members" in data ? (data as ManagerData) : null;
   return (
-    <main className={styles.shell}>
-      <aside>
+    <main className={styles.shell} data-collapsed={collapsed} data-drawer={drawerOpen}>
+      {/* Mobile only: tapping the dimmed backdrop closes the drawer, the
+          same as picking a destination inside it. */}
+      <div className={styles.navScrim} onClick={() => setDrawerOpen(false)} aria-hidden="true" />
+      <aside id="onework-sidebar">
         <button type="button" className={styles.logo} onClick={() => goToView("dashboard")}>
           <span>1</span>
           <b>
-            OneWork<small>LIVE PLATFORM</small>
+            OneWork<small>EMPLOYEE OS</small>
           </b>
         </button>
-        <nav>
-          {nav.map(([id, icon, label]) => (
-            <button
-              className={view === id ? styles.active : ""}
-              key={id}
-              title={label}
-              onClick={() => goToView(id)}
-            >
-              <span>{icon}</span>
-              {label}
-            </button>
+        <nav aria-label="Main">
+          <NavButton
+            icon="home"
+            label="Home"
+            active={view === "dashboard"}
+            collapsed={collapsed}
+            onClick={() => goToView("dashboard")}
+          />
+
+          {/* MANAGEMENT — admin only. The client-side gate here is for
+              presentation; the real boundary is the FastAPI `admin_user`
+              dependency on every /api/v1/admin/* endpoint, which is
+              unchanged. */}
+          {isAdmin && (
+            <>
+              <NavHeading label="Management" />
+              {MANAGEMENT_GROUPS.map((group) => (
+                <NavButton
+                  key={group.key}
+                  icon={group.icon}
+                  label={group.label}
+                  hint={group.blurb}
+                  active={activeManagementGroup?.key === group.key}
+                  collapsed={collapsed}
+                  onClick={() => goToAdminSection(group.sections[0][0])}
+                />
+              ))}
+            </>
+          )}
+
+          {isManager && (
+            <>
+              <NavHeading label="Team" />
+              <NavButton
+                icon="team"
+                label="My Team"
+                hint="Readiness and overdue items for your reports."
+                active={view === "manager"}
+                collapsed={collapsed}
+                onClick={() => goToView("manager")}
+              />
+            </>
+          )}
+
+          <NavHeading label="My Work" />
+          {MY_WORK_NAV.map((item) => (
+            <NavButton
+              key={item.id}
+              icon={item.icon}
+              label={item.label}
+              active={view === item.id}
+              collapsed={collapsed}
+              onClick={() => goToView(item.id)}
+            />
           ))}
           {/* SOP documents live in SOPGalaxy, not OneWork — this opens it
               directly rather than routing to an in-app SOP screen. */}
-          <button
-            type="button"
-            title="Open SOPGalaxy"
+          <NavButton
+            icon="external"
+            label="SOP repository"
+            hint="Opens SOPGalaxy in a new tab."
+            external
+            collapsed={collapsed}
             onClick={() => window.open("https://app.sopgalaxy.com/", "_blank", "noopener,noreferrer")}
-          >
-            <span>▤</span>
-            SOP repository ↗
-          </button>
+          />
         </nav>
+        <button
+          type="button"
+          className={styles.navCollapse}
+          onClick={toggleCollapsed}
+          aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+          title={collapsed ? "Expand navigation" : "Collapse navigation"}
+        >
+          <Icon name="panel" size={16} />
+          <span className={styles.navLabel}>Collapse</span>
+        </button>
         <div className={styles.user}>
           <span>
             {session.user.name
@@ -924,9 +1075,55 @@ export default function WorkingPlatform() {
       </aside>
       <section className={styles.work}>
         <header>
+          <button
+            type="button"
+            className={styles.navToggle}
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Open navigation"
+            aria-controls="onework-sidebar"
+            aria-expanded={drawerOpen}
+          >
+            <Icon name="panel" size={18} />
+          </button>
           <div>
-            <small>{(session.user.org_name || "YOUR ORGANISATION").toUpperCase()} · LIVE DATA</small>
-            <h1 ref={headingRef} tabIndex={-1}>{nav.find((x) => x[0] === view)?.[2]}</h1>
+            {/* Breadcrumbs: "Management / People / Employees". Gives context
+                without asking anyone to hold the whole app hierarchy in
+                their head. Only rendered where there IS a hierarchy — a
+                single-level screen like Certificates just shows its
+                title. */}
+            {activeManagementGroup ? (
+              <nav className={styles.crumbs} aria-label="Breadcrumb">
+                <button type="button" onClick={() => goToAdminSection("overview")}>Management</button>
+                <span aria-hidden="true">/</span>
+                {(() => {
+                  const sectionLabel = activeManagementGroup.sections.find(([id]) => id === adminSection)?.[1];
+                  // A group's first section usually carries the group's own
+                  // name (Overview → Overview), and "Management / Overview /
+                  // Overview" reads like a bug. Only show the third level
+                  // when it actually says something new.
+                  if (!sectionLabel || sectionLabel === activeManagementGroup.label)
+                    return <b>{activeManagementGroup.label}</b>;
+                  return (
+                    <>
+                      <button type="button" onClick={() => goToAdminSection(activeManagementGroup.sections[0][0])}>
+                        {activeManagementGroup.label}
+                      </button>
+                      <span aria-hidden="true">/</span>
+                      <b>{sectionLabel}</b>
+                    </>
+                  );
+                })()}
+              </nav>
+            ) : (
+              <small>{(session.user.org_name || "YOUR ORGANISATION").toUpperCase()} · LIVE DATA</small>
+            )}
+            <h1 ref={headingRef} tabIndex={-1}>
+              {activeManagementGroup
+                ? activeManagementGroup.sections.length > 1
+                  ? activeManagementGroup.sections.find(([id]) => id === adminSection)?.[1]
+                  : activeManagementGroup.label
+                : VIEW_LABELS[view]}
+            </h1>
           </div>
           <div className={styles.notifWrap}>
             <button
@@ -1796,93 +1993,48 @@ export default function WorkingPlatform() {
               )}
             </>
           )}
-          {view === "admin" && (
-            <>
-              <div className={styles.adminGroupTabs}>
-                {ADMIN_GROUPS.map((g) => {
-                  const active = adminGroupFor(adminSection).key === g.key;
-                  return (
-                    <button
-                      key={g.key}
-                      type="button"
-                      data-active={active}
-                      onClick={() => { if (!active) goToAdminSection(g.sections[0][0]); }}
-                    >
-                      <span>{g.icon}</span>
-                      {g.label}
-                    </button>
-                  );
-                })}
-              </div>
-              {adminGroupFor(adminSection).sections.length > 1 && (
-                <div className={styles.adminSubTabs}>
-                  {adminGroupFor(adminSection).sections.map(([id, label]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      data-active={adminSection === id}
-                      onClick={() => goToAdminSection(id)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-          {adminData && adminSection === "overview" && (
-            <section className={styles.orgReadiness}>
-              <ReadinessRing
-                readiness={adminData.readiness}
-                caption="org readiness"
-                drillDown={{ training: () => goToAdminSection("employees"), raci_coverage: () => goToAdminSection("matrix") }}
-              />
-              <div>
-                <b>Organisation readiness</b>
-                <p>
-                  Blends training completion, certificate currency and how many
-                  Responsibility Matrix rows actually have a named owner — not
-                  just an assigned role. Hover or tap the score for the full
-                  breakdown.
-                </p>
-              </div>
-            </section>
-          )}
-          {adminData && adminSection === "overview" && (
-            <div className={styles.stats}>
-              <Stat
-                label="EMPLOYEES"
-                value={adminData.employees}
-                note="Tenant scoped"
-              />
-              <Stat
-                label="COMPLETION"
-                value={`${adminData.training_completion}%`}
-                note="All assigned learning"
-                tone="readiness"
-              />
-              <Stat
-                label="CERTIFICATES"
-                value={adminData.certificates}
-                note="Issued records"
-              />
-              <Stat
-                label="AVERAGE SCORE"
-                value={`${adminData.average_quiz_score}%`}
-                note="All quiz attempts"
-              />
-              <Stat
-                label="ACTIVITIES"
-                value={adminData.activities}
-                note="Responsibility records"
-              />
-              <Stat
-                label="OPEN FEEDBACK"
-                value={adminData.open_feedback}
-                note="Governance queue"
-                tone={adminData.open_feedback > 0 ? "risk" : undefined}
-              />
+          {/* Progressive disclosure (brief §8): the seven management
+              concepts live in the sidebar, and a group's internal sections
+              only appear once you're inside it — so the tab bar never
+              becomes a flat sitemap of all thirteen. A group with a single
+              section (Compliance, Feedback, Activity Log, Responsibilities)
+              shows no tab bar at all; the breadcrumb already names it. */}
+          {activeManagementGroup && activeManagementGroup.sections.length > 1 && (
+            <div className={styles.adminSubTabs}>
+              {activeManagementGroup.sections.map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  data-active={adminSection === id}
+                  onClick={() => goToAdminSection(id)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
+          )}
+          {/* Management → Overview. The readiness ring (and its drill-down
+              into the screens behind each component) is passed in rather
+              than rebuilt, so that existing behaviour is preserved exactly
+              while the surrounding screen becomes a real management
+              landing page. */}
+          {view === "admin" && adminSection === "overview" && (
+            <ManagementOverview
+              token={session.access_token}
+              analytics={adminData}
+              viewerName={session.user.name}
+              onNavigate={goToAdminSection}
+              readinessSlot={
+                <ReadinessRing
+                  readiness={adminData?.readiness}
+                  caption="organisation readiness"
+                  drillDown={{
+                    training: () => goToAdminSection("employees"),
+                    raci_coverage: () => goToAdminSection("matrix"),
+                  }}
+                />
+              }
+            />
           )}
           {view === "admin" && adminSection !== "overview" && (
             <AdminConsole token={session.access_token} section={adminSection} />
@@ -1934,6 +2086,54 @@ export default function WorkingPlatform() {
       )}
       <AiAssistant token={session.access_token} unreadCount={unreadCount} notifications={notifications} />
     </main>
+  );
+}
+
+// A sidebar group heading ("Management", "My Work"). The label is always in
+// the DOM and the collapsed icon-rail hides it in CSS (falling back to a
+// divider rule), rather than this component branching on `collapsed`: the
+// mobile drawer is a case where the rail is "collapsed" by preference but
+// the sidebar is showing full-width, and a JS branch got that wrong.
+function NavHeading({ label }: { label: string }) {
+  return (
+    <span className={styles.navHeading} role="presentation">
+      <span className={styles.navLabel}>{label}</span>
+    </span>
+  );
+}
+
+// One navigation destination. Two accessibility details worth keeping:
+//   * The button always carries an aria-label, so a collapsed icon-only rail
+//     is still fully navigable by keyboard and screen reader. (The previous
+//     responsive rule shrank labels to font-size:0, which hides text from
+//     sighted users AND leaves the accessible name as an empty string.)
+//   * `title` gives sighted mouse users the same text as a native tooltip,
+//     which is what the brief asks for on the collapsed rail.
+function NavButton({
+  icon, label, hint, active, collapsed, external, onClick,
+}: {
+  icon: IconName;
+  label: string;
+  hint?: string;
+  active?: boolean;
+  collapsed: boolean;
+  external?: boolean;
+  onClick: () => void;
+}) {
+  const accessibleName = external ? `${label} (opens in a new tab)` : label;
+  return (
+    <button
+      type="button"
+      className={active ? styles.active : ""}
+      aria-label={accessibleName}
+      aria-current={active ? "page" : undefined}
+      title={collapsed ? accessibleName : hint || accessibleName}
+      onClick={onClick}
+    >
+      <span className={styles.navIcon}><Icon name={icon} /></span>
+      <span className={styles.navLabel}>{label}</span>
+      {external && !collapsed && <span className={styles.navExternal} aria-hidden="true">↗</span>}
+    </button>
   );
 }
 
