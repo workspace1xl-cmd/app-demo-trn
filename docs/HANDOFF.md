@@ -100,6 +100,14 @@ and all 13 admin sections remain reachable.
 `docs/MANAGEMENT_IA_MAP.md` holds the full old → new safety map: every visible label
 against the unchanged route, component and data source behind it.
 
+## 5b. Handing over to a new engineering team
+
+[`docs/MERN_HANDOFF.md`](MERN_HANDOFF.md) is the full engineering takeover document: local setup
+from zero, moving the code to a different Git repository, the complete data model and 79-endpoint
+API contract, the authentication upgrade path to production-grade auth, the SaaS commercial layer
+(billing, plans, limits), a phased backend-migration strategy, and the 17 tested business rules
+that must survive any rewrite.
+
 ## 6. Repository map
 
 ```text

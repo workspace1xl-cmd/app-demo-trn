@@ -2,6 +2,11 @@
 
 OneWork is a working, multi-tenant employee onboarding, training and organisational knowledge platform. The repository contains the management presentation, employee and administrator application, cloud API, PostgreSQL schema, seed content, tests and a portable local stack.
 
+> **New engineering team? Start here: [`docs/MERN_HANDOFF.md`](docs/MERN_HANDOFF.md).**
+> It is a complete, step-by-step takeover guide — get it running locally, move it to your own
+> Git, the full data model and API contract, how to replace the auth with production-grade
+> auth, how to turn it into a commercial SaaS, and the business rules you must not break.
+
 ## Live links
 
 - Management presentation: https://onework-employee-os-demo.vercel.app
