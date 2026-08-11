@@ -2,6 +2,19 @@
 
 OneWork is a working, multi-tenant employee onboarding, training and organisational knowledge platform. The repository contains the management presentation, employee and administrator application, cloud API, PostgreSQL schema, seed content, tests and a portable local stack.
 
+> **New engineering team? Do this:** clone the repo, run `claude`, and paste:
+> *"Read `docs/AUTORUN.md` and execute it. Work autonomously through the phases."*
+>
+> It migrates the backend to Express, hardens the auth and adds the billing layer — locally,
+> verifying itself at every phase, stopping only for your repo URL, API keys and the final push.
+>
+> | Document | Use it for |
+> | --- | --- |
+> | [`docs/AUTORUN.md`](docs/AUTORUN.md) | **The hands-off migration. Start here.** |
+> | [`docs/AGENT_PLAYBOOK.md`](docs/AGENT_PLAYBOOK.md) | Same work, human-gated task by task |
+> | [`docs/MERN_HANDOFF.md`](docs/MERN_HANDOFF.md) | The reference: data model, 79-endpoint API contract, auth plan, SaaS plan |
+> | [`CLAUDE.md`](CLAUDE.md) | Auto-loaded guardrails — every Claude Code session reads this |
+
 ## Live links
 
 - Management presentation: https://onework-employee-os-demo.vercel.app
