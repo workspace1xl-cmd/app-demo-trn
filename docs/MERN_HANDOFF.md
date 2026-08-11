@@ -37,13 +37,16 @@ Replace the Python/Deno API with **Express**, and **keep PostgreSQL**.
 
 - You get the "E", "R" and "N" of MERN. You keep a database that already models this domain
   correctly.
-- Effort: roughly **2–4 weeks** for one competent backend developer.
+- Effort with Claude Code: roughly **1–2 days of agent working time.** The work is mechanical —
+  translating a readable reference implementation into another language, with automated
+  verification at every step.
 - Risk: **low**. The database, the security model and all the business rules stay put. You are
   only re-expressing the HTTP layer in a different language.
 
 ### Path B — Full MERN (migrate PostgreSQL → MongoDB)
 
-- Effort: roughly **8–14 weeks**, and that is if it goes well.
+- Effort with Claude Code: roughly **4–7 days of agent working time**, plus ongoing risk that
+  never fully goes away (below).
 - Risk: **high**, for three specific reasons, explained in Part 9. In summary:
   1. **You lose Row-Level Security.** PostgreSQL currently enforces tenant isolation *inside the
      database* — 30 tables have RLS enabled and 36 policies. MongoDB has no equivalent. Every
@@ -915,17 +918,41 @@ isolation on it.
 
 ## 9.5 Realistic effort estimate
 
+**This project was largely built by Claude Code, and it should be migrated by Claude Code.** The
+estimates below are therefore in *agent working time*, not human developer time. If you are
+hand-writing this, multiply by roughly 15–20×.
+
 | Phase | Path A (Postgres + Express) | Path B (full MERN) |
 | --- | --- | --- |
-| Learn the codebase | 3–5 days | 3–5 days |
-| Express scaffold + proxy | 2–3 days | 2–3 days |
-| Port 79 endpoints | 10–15 days | 10–15 days |
-| Database migration | — | **15–25 days** |
-| Rewrite RLS as app-layer guards | — | **5–10 days** |
-| Auth hardening (Part 7) | 8–12 days | 8–12 days |
-| SaaS billing layer (Part 8) | 10–15 days | 10–15 days |
-| Testing & hardening | 5–8 days | **10–15 days** |
-| **Total (1 developer)** | **~8–10 weeks** | **~16–20 weeks** |
+| Orientation + safety net (isolation test, golden files) | 1–2 hours | 1–2 hours |
+| Express scaffold + proxy seam | ~1 hour | ~1 hour |
+| Port 79 endpoints | 4–8 hours | 4–8 hours |
+| Database migration to MongoDB | — | **1–3 days** |
+| Reimplement RLS as application guards | — | **4–8 hours** |
+| Auth hardening (Part 7) | 3–6 hours | 3–6 hours |
+| SaaS billing layer (Part 8) | 3–6 hours | 3–6 hours |
+| **Total agent working time** | **~1–2 days** | **~4–7 days** |
+
+### What does *not* compress
+
+Agent speed is real, but some things are bounded by the outside world, not by typing speed:
+
+| Blocker | Why it takes calendar time |
+| --- | --- |
+| Stripe account + verification | Stripe reviews new accounts; can take days |
+| Email provider + domain verification | DNS propagation, sender reputation |
+| Your own Supabase/Vercel/DNS setup | Human accounts, human approvals |
+| Reviewing what the agent built | You are accountable for this code |
+| Staging soak before real customers | You want a few days of it running |
+| Security review of the auth changes | Worth paying a human for |
+
+**Realistic calendar estimate: 1–2 weeks**, most of which is waiting on external accounts and
+reviewing, not building. The building is days.
+
+**And the important caveat:** fast is not the same as safe. The staging in Part 9.3 and in
+`docs/AGENT_PLAYBOOK.md` is not there because the work is slow — it is there because a
+verification gate between phases is what stops a fast agent from confidently shipping a
+cross-tenant data leak. Keep the gates; they cost minutes and they are the whole safety story.
 
 ---
 
