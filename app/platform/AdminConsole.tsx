@@ -125,7 +125,7 @@ function Pagination({ page, pageSize, total, onPage, onPageSize }: { page: numbe
 
 type Column<T> = { key: string; label: string; render?: (row: T) => React.ReactNode };
 
-function DataTable<T>({ columns, rows, rowId, loading, actions }: { columns: Column<T>[]; rows: T[]; rowId: (row: T) => string; loading: boolean; actions?: (row: T) => React.ReactNode }) {
+function DataTable<T>({ columns, rows, rowId, loading, actions, empty }: { columns: Column<T>[]; rows: T[]; rowId: (row: T) => string; loading: boolean; actions?: (row: T) => React.ReactNode; empty?: React.ReactNode }) {
   // Same fix as PlatformApp's top-level content: a table that's already
   // showing rows must NOT vanish back to a bare loading line every time
   // reloadKey bumps (after any Create/Edit/Import/delete across all 8
@@ -138,7 +138,17 @@ function DataTable<T>({ columns, rows, rowId, loading, actions }: { columns: Col
   // already sets — state what's true, then what to expect next, reusing
   // that standard rather than inventing a new one. Shared across every
   // admin table that doesn't pass its own more specific empty message.
-  if (!loading && !rows.length) return <div className={styles.noRecords}>No records found. Nothing here yet — new entries will appear as soon as they&apos;re added.</div>;
+  // The `empty` prop is the "own more specific message" this comment always
+  // anticipated — the management-facing screens (Compliance, Feedback,
+  // Candidates, Activity Log) now say what is actually true of *that* screen
+  // instead of a generic line. Anything that doesn't pass one keeps the
+  // shared default unchanged.
+  if (!loading && !rows.length)
+    return (
+      <div className={styles.noRecords}>
+        {empty ?? "No records found. Nothing here yet — new entries will appear as soon as they're added."}
+      </div>
+    );
   return (
     <div className={styles.dataTable} data-syncing={loading && rows.length > 0 ? "true" : "false"}>
       <table>
@@ -667,6 +677,7 @@ function CandidatesPanel({ token }: { token: string }) {
             rows={list.items}
             rowId={(row) => row.id}
             loading={list.loading}
+            empty="No candidates in the pipeline. Invite someone to start their pre-joining journey."
           />
           <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
           {modal && (
@@ -1657,6 +1668,14 @@ function FeedbackQueueTab({ token }: { token: string }) {
         rows={list.items}
         rowId={(row) => row.id}
         loading={list.loading}
+        empty={
+          // "Nothing is outstanding" and "nothing matches this filter" are
+          // different facts, and only the first is good news — so only say it
+          // on the unfiltered Open tab.
+          statusFilter === "open" && !departmentFilter
+            ? "No outstanding feedback. Every question employees raised has been handled."
+            : `No ${statusFilter.replace(/_/g, " ")} feedback matches the selected filters.`
+        }
         actions={(row) => (
           row.status === "resolved" || row.status === "dismissed"
             ? <span style={{ fontSize: 8, color: "#8b8f9e" }}>Closed</span>
@@ -1732,6 +1751,7 @@ function SuggestionQueueTab({ token }: { token: string }) {
         rows={list.items}
         rowId={(row) => row.id}
         loading={list.loading}
+        empty={`No suggestions are ${statusFilter.replace(/_/g, " ")} right now.`}
         actions={(row) => (
           ["accepted", "rejected", "implemented"].includes(row.status)
             ? <span style={{ fontSize: 8, color: "#8b8f9e" }}>Closed</span>
@@ -2164,6 +2184,7 @@ function AuditPanel({ token }: { token: string }) {
         rows={list.items}
         rowId={(row) => row.id}
         loading={list.loading}
+        empty="No activity matches the selected filters."
       />
       <Pagination page={list.page} pageSize={list.pageSize} total={list.total} onPage={list.setPage} onPageSize={list.setPageSize} />
     </section>
@@ -2268,7 +2289,13 @@ function ExecPanel({ token }: { token: string }) {
       {activities.length > 0 ? (
         <ResponsibilityGraph activities={activities} mode="full" />
       ) : (
-        <p className={styles.noRecords}>No records found.</p>
+        // The last generic "No records found." in the admin area — called out
+        // as a known remaining gap in the delivery handoff. Says what's true
+        // and what to do about it, like every other empty state now does.
+        <p className={styles.noRecords}>
+          Nothing to plot yet. The graph draws itself from the Responsibility Matrix — add who owns
+          what under Management → Responsibilities and it will appear here.
+        </p>
       )}
     </section>
   );
@@ -2562,6 +2589,7 @@ function RulesListTab({ token }: { token: string }) {
         rows={rules}
         rowId={(row) => row.id}
         loading={loading}
+        empty="No policies published yet. Rules you add here become required reading for the people they apply to."
         actions={(row) => (
           <div className={styles.workflowRow}>
             <button className={styles.iconBtn} data-tip="Edit" onClick={() => setModal({ mode: "edit", row })}>✎</button>
@@ -2643,6 +2671,7 @@ function RuleSuggestionsTab({ token }: { token: string }) {
           rows={suggestions}
           rowId={(row) => row.id}
           loading={false}
+          empty={`No suggested changes are ${statusFilter.replace(/_/g, " ")} right now.`}
           actions={(row) => (
             ["accepted", "rejected", "implemented"].includes(row.status)
               ? <span style={{ fontSize: 8, color: "#8b8f9e" }}>Closed</span>
